@@ -1,0 +1,73 @@
+﻿<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>WinSpeedBall 测试 - Ruffle/Flash 检测</title>
+<style>
+  body { font-family:"Segoe UI","Microsoft YaHei",sans-serif; max-width:720px; margin:40px auto; background:#0D1117; color:#C9D1D9; padding:20px; }
+  h1 { color:#58A6FF; }
+  .info { background:#161B22; border:1px solid #30363D; border-radius:6px; padding:12px; margin:16px 0; font-size:13px; }
+  .info strong { color:#7EE787; }
+  .info.warn { border-color:#D29922; }
+  .info.warn strong { color:#D29922; }
+  canvas { display:block; margin:20px auto; border:1px solid #30363D; border-radius:8px; background:#0A0A0A; }
+</style>
+</head>
+<body>
+<h1>测试页：Ruffle/Flash/SWF 检测</h1>
+
+<div class="info warn">
+  <strong>说明：</strong>此页面模拟了 Ruffle 和 Flash/SWF 播放器场景，不含标准 video/audio 元素。<br>
+  扩展应检测到特殊播放器并给出友好提示。
+</div>
+
+<!-- 模拟 Ruffle 对象 -->
+<div class="info">
+  场景1：模拟 Ruffle Player 全局对象
+</div>
+<script>
+  window.RufflePlayer = { version: "nightly-2023-01-01" };
+  console.log("[Test] 模拟 RufflePlayer 已注入");
+</script>
+
+<!-- 模拟 Flash object -->
+<div class="info">
+  场景2：模拟 Flash/SWF 元素
+</div>
+<object type="application/x-shockwave-flash" data="test.swf" width="400" height="300">
+  <param name="movie" value="test.swf">
+  您的浏览器不支持 Flash。
+</object>
+
+<embed type="application/x-shockwave-flash" src="test.swf" width="0" height="0">
+
+<!-- 仅 canvas 无 video -->
+<div class="info">
+  场景3：Canvas（无 video 元素）
+</div>
+<canvas id="testCanvas" width="400" height="200"></canvas>
+
+<div class="info" style="margin-top:24px;">
+  <strong>测试步骤：</strong><br>
+  1. 打开扩展 popup，点击「检测」。<br>
+  2. 应显示 "检测到特殊播放器: Ruffle/Flash" 和友好提示。<br>
+  3. 媒体数量应为 0，但不会显示 "扩展失效"。<br>
+  4. 点击倍速按钮，应返回 ok: false，但提示清晰。
+</div>
+
+<script>
+  var canvas = document.getElementById("testCanvas");
+  var ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#1A1A2E";
+  ctx.fillRect(0, 0, 400, 200);
+  ctx.fillStyle = "#58A6FF";
+  ctx.font = "18px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("模拟 Canvas 播放器", 200, 100);
+  ctx.fillStyle = "#8B949E";
+  ctx.font = "12px sans-serif";
+  ctx.fillText("该区域不是标准 HTML5 video", 200, 130);
+</script>
+
+</body>
+</html>

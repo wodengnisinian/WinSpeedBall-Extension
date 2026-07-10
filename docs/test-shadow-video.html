@@ -1,0 +1,47 @@
+﻿<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>WinSpeedBall 测试 - Shadow DOM video</title>
+<style>
+  body { font-family:"Segoe UI","Microsoft YaHei",sans-serif; max-width:720px; margin:40px auto; background:#0D1117; color:#C9D1D9; padding:20px; }
+  h1 { color:#58A6FF; }
+  .info { background:#161B22; border:1px solid #30363D; border-radius:6px; padding:12px; margin:16px 0; font-size:13px; }
+  .info strong { color:#7EE787; }
+</style>
+</head>
+<body>
+<h1>测试页：Shadow DOM video</h1>
+<div class="info">
+  <strong>说明：</strong>此页面的 video 元素被包裹在 Shadow DOM 中。扩展需要穿透 shadowRoot 才能检测和控制。
+</div>
+
+<div id="host"></div>
+
+<div class="info" style="margin-top:24px;">
+  <strong>测试步骤：</strong><br>
+  1. 打开扩展 popup，点击「检测」查看媒体数量（应为 1）。<br>
+  2. 如果媒体数量为 0，说明 Shadow DOM 穿透失败。<br>
+  3. 点击 2.0x 倍速按钮，视频应变快。<br>
+  4. 测试静音和音量控制。
+</div>
+
+<script>
+  var host = document.getElementById("host");
+  var shadow = host.attachShadow({ mode: "open" });
+
+  shadow.innerHTML = `
+    <style>
+      video { display:block; margin:16px 0; max-width:100%; border:1px solid #30363D; border-radius:8px; }
+    </style>
+    <h3 style="color:#C9D1D9;">Shadow DOM 内的 Video</h3>
+    <video controls width="640" id="shadowVideo">
+      <source src="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4" type="video/mp4">
+    </video>
+  `;
+
+  console.log("[Test] Shadow DOM 已创建，video 在 shadowRoot 内");
+</script>
+
+</body>
+</html>

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>WinSpeedBall OCR Runtime Test</title>
+</head>
+<body>
+  <div id="result">RUNNING</div>
+  <canvas id="source" width="1000" height="220"></canvas>
+  <script src="../vendor/tesseract/tesseract.min.js"></script>
+  <script>
+    (async function () {
+      var result = document.getElementById("result");
+      var canvas = document.getElementById("source");
+      var context = canvas.getContext("2d");
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = "#000";
+      context.font = "bold 92px Arial";
+      context.fillText("QUESTION 42", 80, 145);
+      try {
+        var worker = await Tesseract.createWorker("eng", 1, {
+          workerPath: "../vendor/tesseract/worker.min.js",
+          workerBlobURL: false,
+          corePath: "../vendor/tesseract/tesseract-core.wasm.js",
+          langPath: "../vendor/tesseract",
+          gzip: true
+        });
+        var response = await worker.recognize(canvas.toDataURL("image/png"));
+        var text = String(response && response.data && response.data.text || "").trim();
+        await worker.terminate();
+        result.textContent = /QUESTION\s*42/i.test(text) ? "PASS: " + text : "FAIL: " + text;
+      } catch (error) {
+        result.textContent = "ERROR: " + (error && error.message || String(error));
+      }
+    })();
+  </script>
+</body>
+</html>

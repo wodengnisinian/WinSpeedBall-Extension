@@ -1,0 +1,45 @@
+﻿<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>WinSpeedBall 测试 - 普通 video/audio</title>
+<style>
+  body { font-family:"Segoe UI","Microsoft YaHei",sans-serif; max-width:720px; margin:40px auto; background:#0D1117; color:#C9D1D9; padding:20px; }
+  h1 { color:#58A6FF; }
+  video, audio { display:block; margin:20px 0; max-width:100%; border:1px solid #30363D; border-radius:8px; }
+  .info { background:#161B22; border:1px solid #30363D; border-radius:6px; padding:12px; margin:16px 0; font-size:13px; }
+  .info strong { color:#7EE787; }
+</style>
+</head>
+<body>
+<h1>测试页：普通 video/audio</h1>
+<div class="info">
+  <strong>说明：</strong>此页面包含标准 HTML5 video 和 audio 元素。扩展应能正常检测并控制倍速、静音、音量。
+</div>
+
+<h3>Video 1 - Big Buck Bunny</h3>
+<video controls width="640" src="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4">
+  您的浏览器不支持 video 标签。
+</video>
+
+<h3>Video 2 - 本地测试（通过 URL）</h3>
+<video controls width="640" id="testVideo">
+  <source src="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4" type="video/mp4">
+</video>
+
+<h3>Audio 测试</h3>
+<audio controls src="https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3">
+  您的浏览器不支持 audio 标签。
+</audio>
+
+<div class="info">
+  <strong>测试步骤：</strong><br>
+  1. 打开扩展 popup，点击「检测」查看媒体数量（应为 3）。<br>
+  2. 点击 2.0x 倍速按钮，所有视频和音频应变为 2 倍速。<br>
+  3. 点击静音，所有媒体应静音。<br>
+  4. 点击 50% 音量，检查音量变化。<br>
+  5. 使用 Ctrl+Shift+Up / Down 快捷键测试步进。
+</div>
+
+</body>
+</html>
