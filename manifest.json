@@ -1,29 +1,14 @@
 {
   "manifest_version": 3,
-  "minimum_chrome_version": "120",
+  "minimum_chrome_version": "135",
   "name": "WinSpeedBall",
-  "version": "3.1.0",
-  "description": "Browser extension for video speed, volume, screenshot OCR, and DeepSeek study assistance.",
-  "permissions": ["scripting", "storage", "alarms", "offscreen"],
-  "host_permissions": ["*://*/*"],
+  "version": "3.3.0",
+  "description": "Browser extension for video speed, volume, screenshot OCR, and configurable AI study assistance.",
+  "permissions": ["activeTab", "scripting", "storage", "alarms", "offscreen", "userScripts"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "background.js"
   },
-  "content_scripts": [
-    {
-      "matches": ["*://*/*"],
-      "js": ["shadow_hook.js"],
-      "all_frames": true,
-      "run_at": "document_start",
-      "world": "MAIN"
-    },
-    {
-      "matches": ["*://*/*"],
-      "js": ["content_script.js"],
-      "all_frames": true,
-      "run_at": "document_start"
-    }
-  ],
   "action": {
     "default_icon": {
       "16": "icons/icon-blue-16.png",
@@ -52,16 +37,5 @@
   },
   "sandbox": {
     "pages": ["script_workspace.html"]
-  },
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "vendor/tesseract/tesseract.min.js",
-        "vendor/tesseract/worker.min.js",
-        "vendor/tesseract/tesseract-core.wasm.js",
-        "vendor/tesseract/*.traineddata.gz"
-      ],
-      "matches": ["*://*/*"]
-    }
-  ]
+  }
 }

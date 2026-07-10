@@ -6,7 +6,6 @@
   var ocrRunId = 0;
   var autoAiRequestSourceTime = 0;
   var latestPageText = "";
-  var aiHistory = [];
   var logs = [];
   var logsLoaded = false;
   var lastPanelId = "videoPanel";
@@ -28,59 +27,42 @@
   var captureSelectionWidth = 2;
   var autoSendOcrToAi = false;
   var autoOcrPromptTemplate = "";
+  var aiProviderOptions = [];
+  var AI_PROVIDER_FALLBACKS = [
+    { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", requiresApiKey: true },
+    { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-5.4-mini", requiresApiKey: true },
+    { id: "claude", label: "Claude", baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-5", requiresApiKey: true },
+    { id: "local", label: "本地模型", baseUrl: "http://localhost:11434/v1", model: "gpt-oss:20b", requiresApiKey: false }
+  ];
+  var userScriptsAvailable = false;
+  var scriptMigrationNeeded = false;
+  var popupUtils = self.WinSpeedBallPopupUtils;
+  var popupStorage = self.WinSpeedBallPopupStorage;
+  var messageClient = self.WinSpeedBallPopupMessageClient;
+  var text = popupUtils.text;
+  var $ = popupUtils.byId;
+  var normalizeNavDelayMs = popupUtils.normalizeNavDelayMs;
+  var normalizeNavHideDelayMs = popupUtils.normalizeNavHideDelayMs;
+  var normalizeNavTransitionMs = popupUtils.normalizeNavTransitionMs;
+  var clampNumber = popupUtils.clampNumber;
+  var normalizeCaptureTone = popupUtils.normalizeCaptureTone;
+  var normalizeCaptureWidth = popupUtils.normalizeCaptureWidth;
+  var normalizeNavZones = popupUtils.normalizeNavZones;
+  var storageGet = popupStorage.get;
+  var storageSet = popupStorage.set;
+  var sendMessage = messageClient.send;
+  var getCurrentSiteAccess = messageClient.getCurrentSiteAccess;
+  var ensureSiteAccess = messageClient.ensureSiteAccess;
+  var requestCurrentSiteAccess = messageClient.requestCurrentSiteAccess;
+  var ensureServiceOrigin = messageClient.ensureServiceOrigin;
   var navZones = {
     left: { width: 32, top: 0, bottom: 320 },
     right: { width: 32, top: 0, bottom: 320 },
     top: { height: 32, left: 0, right: 380 }
   };
 
-  function text(value) {
-    return value;
-  }
-
-  function $(id) {
-    return document.getElementById(id);
-  }
-
-  function normalizeNavDelayMs(value) {
-    var ms = Number(value);
-    if (!Number.isFinite(ms)) ms = 800;
-    if (ms <= 10) ms *= 1000;
-    return Math.max(200, Math.min(3000, Math.round(ms)));
-  }
-
-  function normalizeNavHideDelayMs(value) {
-    var ms = Number(value);
-    if (!Number.isFinite(ms)) ms = 900;
-    if (ms <= 10) ms *= 1000;
-    return Math.max(200, Math.min(3000, Math.round(ms)));
-  }
-
-  function normalizeNavTransitionMs(value) {
-    var ms = Number(value);
-    if (!Number.isFinite(ms)) ms = 180;
-    if (ms <= 10) ms *= 1000;
-    return Math.max(50, Math.min(1000, Math.round(ms)));
-  }
-
   function applyNavTransition() {
     document.body.style.setProperty("--nav-transition", navTransitionMs + "ms");
-  }
-
-  function clampNumber(value, fallback, min, max) {
-    var num = Number(value);
-    if (!Number.isFinite(num)) num = fallback;
-    return Math.max(min, Math.min(max, Math.round(num)));
-  }
-
-  function normalizeCaptureTone(value) {
-    return clampNumber(value, 96, 0, 255);
-  }
-
-  function normalizeCaptureWidth(value) {
-    var width = Number(value);
-    if (!Number.isFinite(width)) width = 2;
-    return Math.max(0.1, Math.min(5, Math.round(width * 10) / 10));
   }
 
   function normalizeAutoInterval(value) {
@@ -104,35 +86,10 @@
   }
 
   function saveCaptureStyle() {
-    chrome.storage.local.set({
+    storageSet({
       captureSelectionTone: captureSelectionTone,
       captureSelectionWidth: captureSelectionWidth
     });
-  }
-
-  function normalizeNavZones(value) {
-    var raw = value || {};
-    var zones = {
-      left: {
-        width: clampNumber(raw.left && raw.left.width, 32, 8, 120),
-        top: clampNumber(raw.left && raw.left.top, 0, 0, 320),
-        bottom: clampNumber(raw.left && raw.left.bottom, 320, 0, 320)
-      },
-      right: {
-        width: clampNumber(raw.right && raw.right.width, 32, 8, 120),
-        top: clampNumber(raw.right && raw.right.top, 0, 0, 320),
-        bottom: clampNumber(raw.right && raw.right.bottom, 320, 0, 320)
-      },
-      top: {
-        height: clampNumber(raw.top && raw.top.height, 32, 8, 120),
-        left: clampNumber(raw.top && raw.top.left, 0, 0, 380),
-        right: clampNumber(raw.top && raw.top.right, 380, 0, 380)
-      }
-    };
-    if (zones.left.bottom <= zones.left.top) zones.left.bottom = Math.min(320, zones.left.top + 8);
-    if (zones.right.bottom <= zones.right.top) zones.right.bottom = Math.min(320, zones.right.top + 8);
-    if (zones.top.right <= zones.top.left) zones.top.right = Math.min(380, zones.top.left + 8);
-    return zones;
   }
 
   function readNavZonesFromInputs() {
@@ -177,7 +134,7 @@
     var time = new Date().toLocaleTimeString();
     logs.unshift("[" + time + "] " + value);
     logs = logs.slice(0, 300);
-    if (logsLoaded) chrome.storage.local.set({ popupLogs: logs });
+    if (logsLoaded) storageSet({ popupLogs: logs });
     renderLogs();
   }
 
@@ -200,13 +157,13 @@
   }
 
   function loadLogs() {
-    chrome.storage.local.get(["popupLogs"], function (data) {
+    storageGet(["popupLogs"], function (data) {
       var saved = Array.isArray(data.popupLogs) ? data.popupLogs : [];
       logs = saved.concat(logs).filter(function (item, index, list) {
         return list.indexOf(item) === index;
       }).slice(0, 300);
       logsLoaded = true;
-      chrome.storage.local.set({ popupLogs: logs });
+      storageSet({ popupLogs: logs });
       renderLogs();
     });
   }
@@ -216,20 +173,8 @@
     if (el) el.textContent = logs.length ? logs.join("\n") : text("\u6682\u65e0\u65e5\u5fd7\u3002");
   }
 
-  function sendMessage(message) {
-    return new Promise(function (resolve) {
-      chrome.runtime.sendMessage(message, function (response) {
-        if (chrome.runtime.lastError) {
-          resolve({ ok: false, error: chrome.runtime.lastError.message });
-          return;
-        }
-        resolve(response || { ok: false, error: text("\u6269\u5c55\u540e\u53f0\u65e0\u54cd\u5e94") });
-      });
-    });
-  }
-
   function savePopupState() {
-    chrome.storage.local.set({
+    storageSet({
       popupState: {
         lastPanelId: lastPanelId,
         chromeHidden: true,
@@ -240,7 +185,7 @@
   }
 
   function restorePopupStateOnOpen() {
-    chrome.storage.local.get(["popupState", "scriptWorkspaceActive", "lastWorkspaceScript"], function (data) {
+    storageGet(["popupState", "scriptWorkspaceActive", "lastWorkspaceScript"], function (data) {
       var state = data && data.popupState ? data.popupState : {};
       document.body.classList.add("chrome-hidden");
       if (state.lastPanelId) {
@@ -310,7 +255,7 @@
     document.body.classList.remove("script-workspace");
     document.body.classList.add("chrome-hidden");
     hideScriptChromeNow();
-    chrome.storage.local.set({ scriptWorkspaceActive: false });
+    storageSet({ scriptWorkspaceActive: false });
     savePopupState();
   }
 
@@ -352,7 +297,14 @@
 
   function startDouyinPanel(interval) {
     douyinPanelState.interval = normalizeAutoInterval(interval || douyinPanelState.interval);
-    sendMessage({ action: "douyinPanel", command: "START", interval: douyinPanelState.interval }).then(function (res) {
+    requestCurrentSiteAccess().then(function (site) {
+      if (!site.ok) {
+        postDouyinState(false, site.error || text("\u5f53\u524d\u7f51\u7ad9\u672a\u6388\u6743\u3002"));
+        return null;
+      }
+      return sendMessage({ action: "douyinPanel", command: "START", interval: douyinPanelState.interval, tabId: site.tabId, originPattern: site.originPattern });
+    }).then(function (res) {
+      if (!res) return;
       douyinPanelState.running = !!res.running;
       douyinPanelState.interval = Number(res.interval || douyinPanelState.interval);
       postDouyinState(res.ok, res.message || res.error || "");
@@ -430,7 +382,16 @@
     $("bookStartBtn").addEventListener("click", function () {
       var interval = normalizeAutoInterval($("bookIntervalInput").value);
       $("bookIntervalInput").value = String(interval);
-      sendBookCommand("START", interval, text("\u81ea\u52a8\u7ffb\u9875\u5df2\u542f\u52a8\u3002"));
+      getCurrentSiteAccess().then(function (site) {
+        if (!site.ok) {
+          updateBookPanel({ ok: false, running: false, interval: interval, error: site.error });
+          return;
+        }
+        addDetailedLog("\u56fe\u4e66", "\u5f53\u524d\u7f51\u7ad9\u5df2\u6388\u6743", { \u7f51\u7ad9: site.originPattern });
+        return sendMessage({ action: "bookPanel", command: "START", interval: interval, tabId: site.tabId, originPattern: site.originPattern }).then(function (res) {
+          updateBookPanel(res, res.ok ? text("\u81ea\u52a8\u7ffb\u9875\u5df2\u542f\u52a8\u3002") : "");
+        });
+      });
     });
     $("bookStopBtn").addEventListener("click", function () {
       sendBookCommand("STOP", null, text("\u81ea\u52a8\u7ffb\u9875\u5df2\u505c\u6b62\u3002"));
@@ -448,7 +409,7 @@
     $("scriptRunnerTitle").textContent = lastWorkspaceScript.name;
     enterScriptWorkspace();
     document.body.classList.add("script-ui-active");
-    chrome.storage.local.set({
+    storageSet({
       scriptWorkspaceActive: true,
       lastWorkspaceScript: lastWorkspaceScript,
       popupState: {
@@ -620,7 +581,7 @@
       ["rate", "paused", "volume", "mediaCount", "muted", "duration", "applied"].forEach(function (name) {
         setStatus(name, "-");
       });
-      $("videoStatusHint").textContent = text("\u64cd\u4f5c\u5931\u8d25\uff1a") + ((res && res.error) || text("\u672a\u77e5\u9519\u8bef"));
+      $("videoStatusHint").textContent = text("\u5f53\u524d\u64ad\u653e\u5668\u65e0\u6cd5\u76f4\u63a5\u63a7\u5236\u3002\u539f\u56e0\uff1a") + ((res && res.error) || text("\u672a\u68c0\u6d4b\u5230\u53ef\u63a7\u5236\u7684\u5a92\u4f53"));
       return;
     }
 
@@ -635,7 +596,9 @@
     setStatus("applied", res.applied || 0);
     $("rateInput").value = rate.toFixed(2);
     $("volumeInput").value = volumePercent;
-    $("videoStatusHint").textContent = res.specialPlayerDetected ? (res.reason || text("\u68c0\u6d4b\u5230\u7279\u6b8a\u64ad\u653e\u5668")) : "";
+    $("videoStatusHint").textContent = res.specialPlayerDetected
+      ? (res.reason || text("\u68c0\u6d4b\u5230\u7279\u6b8a\u64ad\u653e\u5668"))
+      : (res.playerType ? text("\u5f53\u524d\u64ad\u653e\u5668：") + res.playerType : "");
   }
 
   function loadManualCapture() {
@@ -718,7 +681,7 @@
         \u4efb\u52a1: captureLabel(sourceTime),
         \u5b57\u6570: cleanText.length
       });
-      chrome.storage.local.set({
+      storageSet({
         manualOcrText: cleanText,
         manualOcrSourceTime: sourceTime
       });
@@ -749,7 +712,7 @@
     }
 
     return new Promise(function (resolve) {
-      chrome.storage.local.get(["autoSendOcrToAi", "manualAiSourceTime"], function (data) {
+      storageGet(["autoSendOcrToAi", "manualAiSourceTime"], function (data) {
         if (chrome.runtime.lastError) {
           addDetailedLog("AI", "\u8bfb\u53d6\u81ea\u52a8\u53d1\u9001\u8bbe\u7f6e\u5931\u8d25", { \u539f\u56e0: chrome.runtime.lastError.message });
           resolve({ ok: false, error: chrome.runtime.lastError.message });
@@ -778,7 +741,7 @@
           OCR\u5b57\u6570: cleanText.length
         });
         $("ocrStatus").textContent = text("OCR \u5b8c\u6210\uff0c\u6b63\u5728\u81ea\u52a8\u53d1\u9001\u7ed9 AI...");
-        askDeepSeek(cleanText, { autoOcrSourceTime: sourceTime }).then(function (res) {
+        askAi(cleanText, { autoOcrSourceTime: sourceTime }).then(function (res) {
           autoAiRequestSourceTime = 0;
           if (res && res.ok) {
             addDetailedLog("AI", "\u81ea\u52a8\u53d1\u9001\u6210\u529f", {
@@ -833,151 +796,127 @@
     });
   }
 
-  function buildPrompt(sourceText) {
-    var mode = $("aiMode").value;
-    var question = $("aiQuestion").value.trim();
-    var instruction = "";
-    if (mode === "summary") instruction = text("\u8bf7\u603b\u7ed3\u4e0b\u9762\u5185\u5bb9\uff0c\u8f93\u51fa\u6e05\u6670\u7684\u8981\u70b9\u3002");
-    else if (mode === "explain") instruction = text("\u8bf7\u89e3\u91ca\u4e0b\u9762\u5185\u5bb9\u7684\u91cd\u70b9\u548c\u96be\u70b9\uff0c\u9002\u5408\u5b66\u4e60\u8005\u7406\u89e3\u3002");
-    else if (mode === "points") instruction = text("\u8bf7\u4ece\u4e0b\u9762\u5185\u5bb9\u4e2d\u63d0\u53d6\u77e5\u8bc6\u70b9\uff0c\u6309\u6761\u76ee\u8f93\u51fa\u3002");
-    else if (mode === "translate") instruction = text("\u8bf7\u628a\u4e0b\u9762\u5185\u5bb9\u7ffb\u8bd1\u6210\u4e2d\u6587\uff0c\u5e76\u4fdd\u7559\u5173\u952e\u672f\u8bed\u3002");
-    else instruction = question || text("\u8bf7\u6839\u636e\u4e0b\u9762\u5185\u5bb9\u56de\u7b54\u6211\u7684\u95ee\u9898\u3002");
-    if (mode !== "custom" && question) instruction += "\n" + text("\u6211\u7684\u8865\u5145\u95ee\u9898\uff1a") + question;
-    return instruction + "\n\n" + text("\u5185\u5bb9\uff1a") + "\n" + sourceText;
+  var aiController = self.WinSpeedBallPopupAiController.create({
+    byId: $,
+    sendMessage: sendMessage,
+    storage: popupStorage,
+    addDetailedLog: addDetailedLog,
+    captureLabel: captureLabel,
+    setTopStatus: setTopStatus,
+    getLatestPageText: function () { return latestPageText; },
+    getAutoOcrPromptTemplate: function () { return autoOcrPromptTemplate; }
+  });
+  var askAi = aiController.ask;
+  var loadAiHistory = aiController.loadHistory;
+
+  function normalizeProviderId(providerId) {
+    providerId = String(providerId || "").toLowerCase();
+    return AI_PROVIDER_FALLBACKS.some(function (item) { return item.id === providerId; }) ? providerId : "deepseek";
   }
 
-  function buildAutoOcrPrompt(sourceText) {
-    var template = String(autoOcrPromptTemplate || "").trim();
-    if (!template) return sourceText;
-    if (template.indexOf("{{OCR}}") >= 0) return template.split("{{OCR}}").join(sourceText);
-    return template + "\n\n" + sourceText;
+  function providerFallback(providerId) {
+    providerId = normalizeProviderId(providerId);
+    return AI_PROVIDER_FALLBACKS.filter(function (item) { return item.id === providerId; })[0] || AI_PROVIDER_FALLBACKS[0];
   }
 
-  function saveAiHistory(entry) {
-    aiHistory = aiHistory.filter(function (item) {
-      return !(item.question === entry.question && item.mode === entry.mode);
-    });
-    aiHistory.unshift(entry);
-    aiHistory = aiHistory.slice(0, 30);
-    chrome.storage.local.set({ aiQuestionHistory: aiHistory }, renderAiHistory);
-  }
-
-  function loadAiHistory() {
-    chrome.storage.local.get(["aiQuestionHistory"], function (data) {
-      aiHistory = Array.isArray(data.aiQuestionHistory) ? data.aiQuestionHistory : [];
-      renderAiHistory();
-    });
-  }
-
-  function renderAiHistory() {
-    var wrap = $("aiHistoryList");
-    if (!wrap) return;
-    if (!aiHistory.length) {
-      wrap.textContent = text("\u6682\u65e0\u8bb0\u5f55");
-      return;
-    }
-    wrap.textContent = "";
-    aiHistory.forEach(function (item, index) {
-      var entry = document.createElement("button");
-      var questionLine = document.createElement("strong");
-      var answerLine = document.createElement("span");
-      var answer = item.answer || "";
-      entry.type = "button";
-      entry.className = "btn";
-      entry.style.cssText = "display:block;width:100%;height:auto;margin-bottom:6px;text-align:left;min-height:54px;padding:6px 7px;line-height:1.35;white-space:normal;";
-      questionLine.textContent = "Q" + (index + 1) + ": " + (item.question || "");
-      answerLine.textContent = "A: " + answer.slice(0, 80) + (answer.length > 80 ? "..." : "");
-      answerLine.style.color = "#8fa8bf";
-      entry.appendChild(questionLine);
-      entry.appendChild(document.createElement("br"));
-      entry.appendChild(answerLine);
-      entry.title = text("\u95ee\u9898\uff1a") + (item.question || "") + "\n\n" + text("\u56de\u590d\uff1a") + answer;
-      entry.addEventListener("click", function () {
-        $("aiMode").value = item.mode || "custom";
-        $("aiQuestion").value = item.question || "";
-        if (item.answer) $("aiAnswer").value = item.answer;
+  function normalizeProviderOptions(rawOptions) {
+    var sourceById = {};
+    if (Array.isArray(rawOptions)) {
+      rawOptions.forEach(function (item) {
+        if (!item || typeof item !== "object") return;
+        sourceById[normalizeProviderId(item.id || item.provider || item.providerId)] = item;
       });
-      wrap.appendChild(entry);
+    } else if (rawOptions && typeof rawOptions === "object") {
+      Object.keys(rawOptions).forEach(function (key) {
+        var item = rawOptions[key];
+        if (!item || typeof item !== "object") return;
+        sourceById[normalizeProviderId(item.id || item.provider || item.providerId || key)] = item;
+      });
+    }
+    return AI_PROVIDER_FALLBACKS.map(function (fallback) {
+      var source = sourceById[fallback.id] || {};
+      return {
+        id: fallback.id,
+        label: String(source.label || fallback.label),
+        baseUrl: String(source.baseUrl || source.defaultBaseUrl || fallback.baseUrl),
+        model: String(source.model || source.defaultModel || fallback.model),
+        hasApiKey: source.hasApiKey === true,
+        requiresApiKey: typeof source.requiresApiKey === "boolean" ? source.requiresApiKey : fallback.requiresApiKey
+      };
     });
   }
 
-  function askDeepSeek(sourceText, options) {
-    options = options || {};
-    sourceText = (sourceText || $("ocrText").value || latestPageText || "").trim();
-    if (!sourceText) {
-      $("aiAnswer").value = text("\u6ca1\u6709\u53ef\u53d1\u9001\u7684\u6587\u5b57\u3002\u8bf7\u5148\u6846\u9009 OCR\uff0c\u6216\u70b9\u51fb\u201c\u8bfb\u53d6\u9875\u9762\u201d\u3002");
-      return Promise.resolve({ ok: false, error: text("\u6ca1\u6709\u53ef\u53d1\u9001\u7684\u6587\u5b57\u3002") });
-    }
+  function findProviderOption(providerId) {
+    providerId = normalizeProviderId(providerId);
+    var option = aiProviderOptions.filter(function (item) { return item.id === providerId; })[0];
+    if (option) return option;
+    var fallback = providerFallback(providerId);
+    return {
+      id: fallback.id,
+      label: fallback.label,
+      baseUrl: fallback.baseUrl,
+      model: fallback.model,
+      hasApiKey: false,
+      requiresApiKey: fallback.requiresApiKey
+    };
+  }
 
-    var mode = $("aiMode").value;
-    var isAutoOcr = !!options.autoOcrSourceTime;
-    var prompt = isAutoOcr ? buildAutoOcrPrompt(sourceText) : buildPrompt(sourceText);
-    var question = isAutoOcr
-      ? prompt
-      : ($("aiQuestion").value.trim() || text("\u8bf7\u5904\u7406\u5f53\u524d\u5185\u5bb9"));
-    if (isAutoOcr) {
-      mode = "custom";
-      $("aiMode").value = "custom";
-      $("aiQuestion").value = prompt;
-    }
-    $("aiAnswer").value = text("\u6b63\u5728\u8bf7\u6c42 DeepSeek...");
-    var requestStartedAt = Date.now();
-    addDetailedLog("AI", "\u8bf7\u6c42\u5df2\u53d1\u51fa", {
-      \u7c7b\u578b: isAutoOcr ? "OCR \u81ea\u52a8\u53d1\u9001" : "\u624b\u52a8\u8bf7\u6c42",
-      \u4efb\u52a1: isAutoOcr ? captureLabel(options.autoOcrSourceTime) : "-",
-      \u6a21\u5f0f: mode,
-      \u63d0\u793a\u8bcd: isAutoOcr ? (autoOcrPromptTemplate ? "\u81ea\u5b9a\u4e49\u6a21\u677f" : "OCR \u539f\u6587") : "AI \u9875\u9762\u8bbe\u7f6e",
-      \u8f93\u5165\u5b57\u6570: prompt.length
+  function syncProviderSelectLabels() {
+    var select = $("providerInput");
+    if (!select) return;
+    aiProviderOptions.forEach(function (item) {
+      var option = select.querySelector('option[value="' + item.id + '"]');
+      if (option) option.textContent = item.label;
     });
-    setTopStatus(text("AI \u8bf7\u6c42\u4e2d"));
-    var payload = { prompt: prompt };
-    if (options.autoOcrSourceTime) payload.autoOcrSourceTime = Number(options.autoOcrSourceTime);
-    return sendMessage({
-      action: "askDeepSeek",
-      payload: payload
-    }).then(function (res) {
-      var answer = res.ok ? res.content : text("\u8bf7\u6c42\u5931\u8d25\uff1a") + (res.error || text("\u672a\u77e5\u9519\u8bef"));
-      $("aiAnswer").value = answer;
-      if (res.ok) {
-        addDetailedLog("AI", "\u8bf7\u6c42\u5b8c\u6210", {
-          \u7c7b\u578b: isAutoOcr ? "OCR \u81ea\u52a8\u53d1\u9001" : "\u624b\u52a8\u8bf7\u6c42",
-          \u4efb\u52a1: isAutoOcr ? captureLabel(options.autoOcrSourceTime) : "-",
-          \u8017\u65f6: (Date.now() - requestStartedAt) + "ms",
-          \u6a21\u578b: res.model || "\u672a\u77e5",
-          \u56de\u590d\u5b57\u6570: answer.length
-        });
-        saveAiHistory({
-          question: question,
-          mode: mode,
-          answer: answer,
-          time: Date.now()
-        });
-      } else {
-        addDetailedLog("AI", "\u8bf7\u6c42\u5931\u8d25", {
-          \u7c7b\u578b: isAutoOcr ? "OCR \u81ea\u52a8\u53d1\u9001" : "\u624b\u52a8\u8bf7\u6c42",
-          \u4efb\u52a1: isAutoOcr ? captureLabel(options.autoOcrSourceTime) : "-",
-          \u8017\u65f6: (Date.now() - requestStartedAt) + "ms",
-          \u539f\u56e0: res.error || "\u672a\u77e5\u9519\u8bef"
-        });
-      }
-      setTopStatus(res.ok ? text("\u5b8c\u6210") : text("\u5931\u8d25"));
-      return res;
-    });
+  }
+
+  function providerStatus(option, prefix) {
+    var detail;
+    if (!option.requiresApiKey) detail = text("无需 API Key，可直接使用。");
+    else if (option.hasApiKey) detail = text("已保存 API Key；输入框留空表示保持不变。");
+    else detail = text("尚未保存 API Key。");
+    return (prefix ? prefix + " " : "") + option.label + "：" + detail;
+  }
+
+  function showProvider(providerId, overrides, prefix) {
+    var option = findProviderOption(providerId);
+    overrides = overrides || {};
+    if (overrides.baseUrl) option.baseUrl = String(overrides.baseUrl);
+    if (overrides.model) option.model = String(overrides.model);
+    if (typeof overrides.hasApiKey === "boolean") option.hasApiKey = overrides.hasApiKey;
+    if (typeof overrides.requiresApiKey === "boolean") option.requiresApiKey = overrides.requiresApiKey;
+    $("providerInput").value = option.id;
+    $("baseUrlInput").value = option.baseUrl;
+    $("modelInput").value = option.model;
+    $("apiKeyInput").value = "";
+    $("apiKeyInput").placeholder = option.requiresApiKey
+      ? (option.hasApiKey ? text("已保存，留空表示保持不变") : text("请输入 API Key"))
+      : text("可选，本地模型通常无需 API Key");
+    $("settingsStatus").textContent = providerStatus(option, prefix);
+    return option;
   }
 
   function loadSettings() {
     sendMessage({ action: "getSettings" }).then(function (res) {
-      if (!res.ok) return;
-      $("baseUrlInput").value = res.deepseekBaseUrl || "https://api.deepseek.com";
-      $("modelInput").value = res.deepseekModel || "deepseek-chat";
-      $("settingsStatus").textContent = res.hasApiKey ? text("\u5df2\u4fdd\u5b58 API Key\u3002") : text("\u5c1a\u672a\u4fdd\u5b58 API Key\u3002");
+      if (!res.ok) {
+        $("settingsStatus").textContent = text("读取 AI 设置失败：") + (res.error || text("未知错误"));
+        return;
+      }
+      aiProviderOptions = normalizeProviderOptions(res.providerOptions);
+      syncProviderSelectLabels();
+      showProvider(res.aiProvider, {
+        baseUrl: res.aiBaseUrl || res.deepseekBaseUrl,
+        model: res.aiModel || res.deepseekModel,
+        hasApiKey: typeof res.hasApiKey === "boolean" ? res.hasApiKey : undefined,
+        requiresApiKey: typeof res.requiresApiKey === "boolean" ? res.requiresApiKey : undefined
+      });
       updateVideoStatus(res);
     });
     loadUiSettings();
   }
 
   function loadUiSettings() {
-    chrome.storage.local.get(["navRevealDelayMs", "navHideDelayMs", "navTransitionMs", "navRevealZones", "navRevealEdgePx", "captureSelectionTone", "captureSelectionWidth", "autoSendOcrToAi", "autoOcrPromptTemplate"], function (data) {
+    storageGet(["navRevealDelayMs", "navHideDelayMs", "navTransitionMs", "navRevealZones", "navRevealEdgePx", "captureSelectionTone", "captureSelectionWidth", "autoSendOcrToAi", "autoOcrPromptTemplate"], function (data) {
       navRevealDelayMs = normalizeNavDelayMs(data.navRevealDelayMs || 800);
       navHideDelayMs = normalizeNavHideDelayMs(data.navHideDelayMs || 900);
       navTransitionMs = normalizeNavTransitionMs(data.navTransitionMs || 180);
@@ -1018,7 +957,7 @@
     navZones = normalizeNavZones(zones || readNavZonesFromInputs());
     captureSelectionTone = normalizeCaptureTone(tone == null ? $("captureToneInput").value : tone);
     captureSelectionWidth = normalizeCaptureWidth(width == null ? $("captureWidthInput").value : width);
-    chrome.storage.local.set({ navRevealDelayMs: navRevealDelayMs, navHideDelayMs: navHideDelayMs, navTransitionMs: navTransitionMs, navRevealZones: navZones, captureSelectionTone: captureSelectionTone, captureSelectionWidth: captureSelectionWidth }, function () {
+    storageSet({ navRevealDelayMs: navRevealDelayMs, navHideDelayMs: navHideDelayMs, navTransitionMs: navTransitionMs, navRevealZones: navZones, captureSelectionTone: captureSelectionTone, captureSelectionWidth: captureSelectionWidth }, function () {
       if ($("navDelayInput")) $("navDelayInput").value = (navRevealDelayMs / 1000).toFixed(1);
       if ($("navHideDelayInput")) $("navHideDelayInput").value = (navHideDelayMs / 1000).toFixed(1);
       if ($("navTransitionInput")) $("navTransitionInput").value = (navTransitionMs / 1000).toFixed(2);
@@ -1030,15 +969,35 @@
   }
 
   function saveSettings(clearKey) {
-    var payload = {
-      action: "saveApiKey",
-      apiKey: clearKey ? "" : $("apiKeyInput").value,
-      baseUrl: $("baseUrlInput").value || "https://api.deepseek.com",
-      model: $("modelInput").value || "deepseek-chat"
-    };
-    sendMessage(payload).then(function (res) {
-      $("settingsStatus").textContent = res.ok ? text("\u8bbe\u7f6e\u5df2\u4fdd\u5b58\u3002") : text("\u4fdd\u5b58\u5931\u8d25\uff1a") + (res.error || text("\u672a\u77e5\u9519\u8bef"));
-      if (res.ok && clearKey) $("apiKeyInput").value = "";
+    var providerId = normalizeProviderId($("providerInput").value);
+    var option = findProviderOption(providerId);
+    var baseUrl = String($("baseUrlInput").value || option.baseUrl).trim();
+    var model = String($("modelInput").value || option.model).trim();
+    var enteredApiKey = String($("apiKeyInput").value || "").trim();
+    var payload = { provider: providerId, baseUrl: baseUrl, model: model };
+    if (clearKey) payload.clearApiKey = true;
+    else if (enteredApiKey) payload.apiKey = enteredApiKey;
+
+    $("settingsStatus").textContent = clearKey ? text("正在清除 API Key...") : text("正在检查 AI 服务地址权限...");
+    var permission = clearKey ? Promise.resolve({ ok: true }) : ensureServiceOrigin(baseUrl);
+    return permission.then(function (permissionResult) {
+      if (!permissionResult.ok) {
+        $("settingsStatus").textContent = text("保存失败：") + (permissionResult.error || text("未授权 AI 服务地址。"));
+        return permissionResult;
+      }
+      return sendMessage({ action: "saveAiSettings", payload: payload }).then(function (res) {
+        if (!res.ok) {
+          $("settingsStatus").textContent = text("保存失败：") + (res.error || text("未知错误"));
+          return res;
+        }
+        option.baseUrl = baseUrl;
+        option.model = model;
+        if (clearKey) option.hasApiKey = false;
+        else if (enteredApiKey) option.hasApiKey = true;
+        if (typeof res.hasApiKey === "boolean") option.hasApiKey = res.hasApiKey;
+        showProvider(providerId, option, clearKey ? text("API Key 已清除。") : text("设置已保存。"));
+        return res;
+      });
     });
   }
 
@@ -1098,7 +1057,7 @@
     });
     $("sendOcrToAiBtn").addEventListener("click", function () {
       document.querySelector('[data-panel="aiPanel"]').click();
-      askDeepSeek($("ocrText").value);
+      askAi($("ocrText").value);
     });
   }
 
@@ -1106,16 +1065,18 @@
     $("usePageTextBtn").addEventListener("click", extractPageText);
     $("askAiBtn").addEventListener("click", function () {
       var pageText = $("ocrText").value.trim() || latestPageText;
-      if (pageText) askDeepSeek(pageText);
-      else extractPageText().then(askDeepSeek);
+      if (pageText) askAi(pageText);
+      else extractPageText().then(askAi);
     });
     $("clearAiHistoryBtn").addEventListener("click", function () {
-      aiHistory = [];
-      chrome.storage.local.set({ aiQuestionHistory: [] }, renderAiHistory);
+      aiController.clearHistory();
     });
   }
 
   function bindSettings() {
+    $("providerInput").addEventListener("change", function () {
+      showProvider($("providerInput").value);
+    });
     $("saveSettingsBtn").addEventListener("click", function () {
       saveSettings(false);
       saveUiSettings();
@@ -1156,7 +1117,7 @@
     $("captureWidthInput").addEventListener("change", saveCaptureStyle);
     $("autoSendOcrToAiInput").addEventListener("change", function () {
       autoSendOcrToAi = $("autoSendOcrToAiInput").checked;
-      chrome.storage.local.set({ autoSendOcrToAi: autoSendOcrToAi }, function () {
+      storageSet({ autoSendOcrToAi: autoSendOcrToAi }, function () {
         $("autoOcrAiStatus").textContent = autoSendOcrToAi
           ? text("\u5df2\u5f00\u542f\uff1aOCR \u7ed3\u679c\u4f1a\u81ea\u52a8\u53d1\u9001\u7ed9 AI\u3002")
           : text("\u5df2\u5173\u95ed\u81ea\u52a8\u53d1\u9001\u3002");
@@ -1169,7 +1130,7 @@
     $("autoOcrPromptInput").addEventListener("change", function () {
       autoOcrPromptTemplate = String($("autoOcrPromptInput").value || "").trim();
       $("autoOcrPromptInput").value = autoOcrPromptTemplate;
-      chrome.storage.local.set({ autoOcrPromptTemplate: autoOcrPromptTemplate }, function () {
+      storageSet({ autoOcrPromptTemplate: autoOcrPromptTemplate }, function () {
         $("autoOcrAiStatus").textContent = autoOcrPromptTemplate
           ? text("\u81ea\u5b9a\u4e49\u63d0\u793a\u8bcd\u5df2\u4fdd\u5b58\u3002")
           : text("\u63d0\u793a\u8bcd\u5df2\u6e05\u7a7a\uff0c\u5c06\u76f4\u63a5\u53d1\u9001 OCR \u539f\u6587\u3002");
@@ -1189,16 +1150,25 @@
         writeNavZonesToInputs();
       });
     });
-    $("testDeepSeekBtn").addEventListener("click", function () {
-      $("settingsStatus").textContent = text("\u6b63\u5728\u6d4b\u8bd5\u8fde\u63a5...");
+    $("testAiBtn").addEventListener("click", function () {
       var startedAt = Date.now();
       addDetailedLog("AI", "\u5f00\u59cb\u8fde\u63a5\u6d4b\u8bd5", {});
-      sendMessage({ action: "testDeepSeek" }).then(function (res) {
-        $("settingsStatus").textContent = res.ok ? text("\u8fde\u63a5\u6210\u529f\uff1a") + res.content : text("\u8fde\u63a5\u5931\u8d25\uff1a") + (res.error || text("\u672a\u77e5\u9519\u8bef"));
-        addDetailedLog("AI", res.ok ? "\u8fde\u63a5\u6d4b\u8bd5\u6210\u529f" : "\u8fde\u63a5\u6d4b\u8bd5\u5931\u8d25", {
-          \u8017\u65f6: (Date.now() - startedAt) + "ms",
-          \u6a21\u578b: res.model || "-",
-          \u539f\u56e0: res.error || "-"
+      saveSettings(false).then(function (saved) {
+        if (!saved || !saved.ok) {
+          addDetailedLog("AI", "\u8fde\u63a5\u6d4b\u8bd5\u5df2\u53d6\u6d88", {
+            \u8017\u65f6: (Date.now() - startedAt) + "ms",
+            \u539f\u56e0: saved && saved.error || "\u8bbe\u7f6e\u4fdd\u5b58\u5931\u8d25"
+          });
+          return;
+        }
+        $("settingsStatus").textContent = text("\u6b63\u5728\u6d4b\u8bd5\u8fde\u63a5...");
+        return sendMessage({ action: "testAI" }).then(function (res) {
+          $("settingsStatus").textContent = res.ok ? text("\u8fde\u63a5\u6210\u529f\uff1a") + res.content : text("\u8fde\u63a5\u5931\u8d25\uff1a") + (res.error || text("\u672a\u77e5\u9519\u8bef"));
+          addDetailedLog("AI", res.ok ? "\u8fde\u63a5\u6d4b\u8bd5\u6210\u529f" : "\u8fde\u63a5\u6d4b\u8bd5\u5931\u8d25", {
+            \u8017\u65f6: (Date.now() - startedAt) + "ms",
+            \u6a21\u578b: res.model || "-",
+            \u539f\u56e0: res.error || "-"
+          });
         });
       });
     });
@@ -1207,13 +1177,13 @@
   function bindLogs() {
     $("clearLogBtn").addEventListener("click", function () {
       logs = [];
-      chrome.storage.local.set({ popupLogs: [] });
+      storageSet({ popupLogs: [] });
       renderLogs();
     });
   }
 
   function parseUserScriptMeta(code) {
-    var meta = { name: "", property: "", description: "", version: "", matches: [], includes: [], excludes: [], runAt: "" };
+    var meta = { name: "", property: "", description: "", version: "", matches: [], includes: [], excludes: [], permissions: [], runAt: "" };
     var textCode = String(code || "");
     var start = textCode.indexOf("// ==UserScript==");
     var end = textCode.indexOf("// ==/UserScript==");
@@ -1230,8 +1200,10 @@
       else if (key === "match") meta.matches.push(value);
       else if (key === "include") meta.includes.push(value);
       else if (key === "exclude") meta.excludes.push(value);
+      else if (key === "permission") meta.permissions.push(String(value || "").trim().toLowerCase());
       else if (key === "run-at" && !meta.runAt) meta.runAt = value;
     });
+    meta.permissions = meta.permissions.filter(function (permission, index, list) { return permission && list.indexOf(permission) === index; });
     return meta;
   }
 
@@ -1248,18 +1220,122 @@
     if (!property) {
       return { ok: false, error: text("\u811a\u672c\u5fc5\u987b\u58f0\u660e @\u5c5e\u6027\uff0c\u53ef\u7528\u503c\uff1a\u89c6\u9891\u3001AI\u3001OCR\u3001\u56fe\u4e66\u3001\u811a\u672c\u3001\u5176\u4ed6\u3002") };
     }
+    var permissions = Array.isArray(meta && meta.permissions) ? meta.permissions : [];
+    if (!permissions.length) {
+      return { ok: false, error: text("\u811a\u672c\u5fc5\u987b\u58f0\u660e @permission\uff0c\u53ef\u7528\u503c\uff1adom\u3001network\u3002") };
+    }
+    if (permissions.some(function (permission) { return ["dom", "network"].indexOf(permission) < 0; })) {
+      return { ok: false, error: text("\u811a\u672c\u5305\u542b\u4e0d\u652f\u6301\u7684 @permission\uff0c\u5f53\u524d\u4ec5\u652f\u6301 dom \u548c network\u3002") };
+    }
     meta.property = property;
-    return { ok: true, property: property };
+    meta.permissions = permissions.slice().sort();
+    return { ok: true, property: property, permissions: meta.permissions };
+  }
+
+  function createScriptId() {
+    try { return crypto.randomUUID().replace(/-/g, ""); } catch (e) { return (Date.now().toString(36) + Math.random().toString(36).slice(2)).slice(0, 48); }
+  }
+
+  function permissionSignature(meta) {
+    return (Array.isArray(meta && meta.permissions) ? meta.permissions.slice().sort() : []).join(",");
+  }
+
+  function permissionDescription(meta) {
+    var permissions = Array.isArray(meta && meta.permissions) ? meta.permissions : [];
+    return permissions.map(function (permission) {
+      if (permission === "dom") return "- dom：读取和修改当前网页内容";
+      if (permission === "network") return "- network：发起受网页跨域规则限制的网络请求";
+      return "- " + permission;
+    }).join("\n");
+  }
+
+  function userScriptsEnableInstruction() {
+    var match = navigator.userAgent.match(/(?:Edg|Chrome|Chromium)\/([0-9]+)/i);
+    var version = match ? Number(match[1]) : 138;
+    return version >= 138
+      ? text("\u8bf7\u6253\u5f00 edge://extensions/ \u6216 chrome://extensions/\uff0c\u8fdb\u5165 WinSpeedBall \u8be6\u7ec6\u4fe1\u606f\uff0c\u5f00\u542f\u201c\u5141\u8bb8\u7528\u6237\u811a\u672c\u201d\u540e\u91cd\u65b0\u52a0\u8f7d\u6269\u5c55\u3002")
+      : text("\u8bf7\u6253\u5f00 edge://extensions/ \u6216 chrome://extensions/\uff0c\u5f00\u542f\u9875\u9762\u53f3\u4e0a\u89d2\u7684\u201c\u5f00\u53d1\u4eba\u5458\u6a21\u5f0f\u201d\u540e\u91cd\u65b0\u52a0\u8f7d\u6269\u5c55\u3002");
+  }
+
+  function loadUserScriptsStatus() {
+    return sendMessage({ action: "getUserScriptsStatus" }).then(function (status) {
+      userScriptsAvailable = !!(status && status.available);
+      var element = $("userScriptsApiStatus");
+      if (element) element.textContent = userScriptsAvailable
+        ? text("\u7528\u6237\u811a\u672c\u5b89\u5168\u6a21\u5f0f\u5df2\u5f00\u542f\uff0c\u5df2\u6ce8\u518c\uff1a") + Number(status.registered || 0)
+        : userScriptsEnableInstruction();
+      if ($("runAllScriptsBtn")) $("runAllScriptsBtn").disabled = !userScriptsAvailable;
+      return status;
+    });
+  }
+
+  function confirmInputPermissions(input) {
+    var meta = safeParseJson(input.dataset.scriptMeta || "{}", parseUserScriptMeta(input.dataset.scriptCode || ""));
+    var validation = validateScriptMeta(meta);
+    if (!validation.ok) return Promise.resolve({ ok: false, error: validation.error });
+    var signature = permissionSignature(meta);
+    if (input.dataset.permissionConfirmed === "true" && input.dataset.permissionSignature === signature) return Promise.resolve({ ok: true, meta: meta });
+    var name = input.dataset.scriptName || input.value || text("\u672a\u547d\u540d\u811a\u672c");
+    var confirmed = window.confirm(text("\u811a\u672c\u201c") + name + text("\u201d\u7533\u8bf7\u4ee5\u4e0b\u6743\u9650\uff1a\n\n") + permissionDescription(meta) + text("\n\n\u53ea\u8fd0\u884c\u4f60\u4fe1\u4efb\u7684\u811a\u672c\u3002\u662f\u5426\u5141\u8bb8\uff1f"));
+    if (!confirmed) return Promise.resolve({ ok: false, error: text("\u7528\u6237\u53d6\u6d88\u4e86\u811a\u672c\u6743\u9650\u3002") });
+    input.dataset.permissionConfirmed = "true";
+    input.dataset.permissionSignature = signature;
+    updateScriptMeta(input);
+    return new Promise(function (resolve) {
+      saveScriptRows(function () { resolve({ ok: true, meta: meta }); });
+    });
+  }
+
+  function scriptPatternMatches(pattern, url) {
+    pattern = String(pattern || "").trim();
+    if (!pattern || pattern === "<all_urls>") return pattern === "<all_urls>";
+    var escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+    try { return new RegExp("^" + escaped + "$").test(url); } catch (e) { return false; }
+  }
+
+  function scriptMetaMatchesUrl(meta, url) {
+    var matches = (meta && meta.matches || []).concat(meta && meta.includes || []);
+    var excludes = meta && meta.excludes || [];
+    if (!matches.length || excludes.some(function (pattern) { return scriptPatternMatches(pattern, url); })) return false;
+    return matches.some(function (pattern) { return scriptPatternMatches(pattern, url); });
+  }
+
+  function hasBroadScriptPattern(meta) {
+    return (meta && meta.matches || []).concat(meta && meta.includes || []).some(function (pattern) {
+      pattern = String(pattern || "").trim();
+      if (pattern === "<all_urls>") return true;
+      var match = pattern.match(/^[^:]+:\/\/([^/]+)/);
+      return !!(match && match[1].indexOf("*") >= 0);
+    });
   }
 
   function executeScriptFeature(script, openWorkspace) {
-    if (openWorkspace) showScriptWorkspaceUi(script.name, script.code);
-    var startedAt = Date.now();
-    addDetailedLog("\u811a\u672c", "\u5f00\u59cb\u6267\u884c", {
-      \u540d\u79f0: script.name || "\u672a\u547d\u540d",
-      \u5c5e\u6027: script.meta && script.meta.property || "-"
+    var input = Array.prototype.slice.call(document.querySelectorAll("#scriptList .script-row input[type='text']")).find(function (item) {
+      return item.dataset.scriptId === script.id;
     });
-    return sendMessage({ action: "executeUserScript", code: script.code }).then(function (res) {
+    if (!input) return Promise.resolve({ ok: false, error: text("\u672a\u627e\u5230\u5bf9\u5e94\u811a\u672c\u3002") });
+    return confirmInputPermissions(input).then(function (permissionResult) {
+      if (!permissionResult.ok) return permissionResult;
+      if (!userScriptsAvailable) return { ok: false, code: "USER_SCRIPTS_DISABLED", error: userScriptsEnableInstruction() };
+      if (openWorkspace) showScriptWorkspaceUi(script.name, script.code);
+      var startedAt = Date.now();
+      addDetailedLog("\u811a\u672c", "\u5f00\u59cb\u6267\u884c", {
+        \u540d\u79f0: script.name || "\u672a\u547d\u540d",
+        \u5c5e\u6027: permissionResult.meta.property || "-",
+        \u6743\u9650: permissionSignature(permissionResult.meta)
+      });
+      return sendMessage({
+        action: "executeUserScript",
+        scriptId: input.dataset.scriptId,
+        code: script.code,
+        permissions: permissionResult.meta.permissions,
+        permissionConfirmed: true
+      }).then(function (res) {
+        if (res.ok) {
+          input.dataset.lastRunAt = String(Date.now());
+          updateScriptMeta(input);
+          saveScriptRows();
+        }
       addDetailedLog("\u811a\u672c", res.ok ? "\u6267\u884c\u6210\u529f" : "\u6267\u884c\u5931\u8d25", {
         \u540d\u79f0: script.name || "\u672a\u547d\u540d",
         \u8017\u65f6: (Date.now() - startedAt) + "ms",
@@ -1267,6 +1343,7 @@
       });
       setTopStatus(res.ok ? text("\u811a\u672c\u529f\u80fd\u5df2\u6267\u884c") : text("\u811a\u672c\u529f\u80fd\u6267\u884c\u5931\u8d25"));
       return res;
+      });
     });
   }
 
@@ -1350,9 +1427,13 @@
       var savedMeta = safeParseJson(input.dataset.scriptMeta || "{}", parseUserScriptMeta(code));
       if (!validateScriptMeta(savedMeta).ok) return;
       rows.push({
+        id: input.dataset.scriptId || createScriptId(),
         name: input.dataset.scriptName || input.value || text("\u672a\u547d\u540d\u811a\u672c"),
         code: code,
         enabled: enabled ? enabled.checked : true,
+        grantedOrigins: safeParseJson(input.dataset.grantedOrigins || "[]", []),
+        permissionConfirmed: input.dataset.permissionConfirmed === "true" && input.dataset.permissionSignature === permissionSignature(savedMeta),
+        permissionSignature: permissionSignature(savedMeta),
         meta: savedMeta,
         savedAt: Number(input.dataset.savedAt || Date.now()),
         lastRunAt: Number(input.dataset.lastRunAt || 0)
@@ -1364,7 +1445,7 @@
   function saveScriptRows(callback) {
     var scripts = getSavedScriptRows();
     renderScriptFeatures(scripts);
-    chrome.storage.local.set({ userScripts: scripts }, function () {
+    storageSet({ userScripts: scripts }, function () {
       if (chrome.runtime.lastError) {
         $("scriptStatus").textContent = text("\u811a\u672c\u4fdd\u5b58\u5931\u8d25\uff1a") + chrome.runtime.lastError.message;
       }
@@ -1393,9 +1474,14 @@
     var property = normalizeScriptProperty(scriptMeta.property);
     var patterns = (scriptMeta.matches || []).concat(scriptMeta.includes || []);
     var autoInfo = patterns.length ? ("@match: " + patterns.slice(0, 2).join(", ")) : text("\u672a\u8bbe\u7f6e @match\uff0c\u4ec5\u624b\u52a8\u8fd0\u884c");
+    var grantedCount = safeParseJson(input.dataset.grantedOrigins || "[]", []).length;
+    var permissions = permissionSignature(scriptMeta) || text("\u672a\u58f0\u660e");
+    var permissionState = input.dataset.permissionConfirmed === "true" && input.dataset.permissionSignature === permissionSignature(scriptMeta)
+      ? text("\u5df2\u786e\u8ba4")
+      : text("\u5f85\u786e\u8ba4");
     var version = scriptMeta.version ? (" v" + scriptMeta.version + " | ") : "";
     var state = enabled && !enabled.checked ? text("\u5df2\u505c\u7528 | ") : text("\u5df2\u542f\u7528 | ");
-    metaEl.textContent = meta || (state + "@\u5c5e\u6027: " + (property || text("\u672a\u8bbe\u7f6e")) + " | " + version + autoInfo + text(" | \u4e0a\u6b21\u8fd0\u884c\uff1a") + fmtDateTime(input.dataset.lastRunAt));
+    metaEl.textContent = meta || (state + "@\u5c5e\u6027: " + (property || text("\u672a\u8bbe\u7f6e")) + " | " + version + autoInfo + text(" | \u6743\u9650\uff1a") + permissions + "(" + permissionState + ")" + text(" | \u5df2\u6388\u6743\u7f51\u7ad9\uff1a") + grantedCount + text(" | \u4e0a\u6b21\u8fd0\u884c\uff1a") + fmtDateTime(input.dataset.lastRunAt));
   }
 
   function runScriptInput(input) {
@@ -1418,9 +1504,25 @@
       updateScriptMeta(input, validation.error);
       return Promise.resolve({ ok: false, error: validation.error });
     }
-    $("scriptStatus").textContent = text("\u6b63\u5728\u6267\u884c\uff1a") + name;
-    updateScriptMeta(input, text("\u6b63\u5728\u8fd0\u884c..."));
-    return sendMessage({ action: "executeUserScript", code: code }).then(function (res) {
+    return confirmInputPermissions(input).then(function (permissionResult) {
+      if (!permissionResult.ok) {
+        $("scriptStatus").textContent = permissionResult.error;
+        return permissionResult;
+      }
+      if (!userScriptsAvailable) {
+        var unavailable = { ok: false, code: "USER_SCRIPTS_DISABLED", error: userScriptsEnableInstruction() };
+        $("scriptStatus").textContent = unavailable.error;
+        return unavailable;
+      }
+      $("scriptStatus").textContent = text("\u6b63\u5728\u6267\u884c\uff1a") + name;
+      updateScriptMeta(input, text("\u6b63\u5728\u8fd0\u884c..."));
+      return sendMessage({
+        action: "executeUserScript",
+        scriptId: input.dataset.scriptId,
+        code: code,
+        permissions: permissionResult.meta.permissions,
+        permissionConfirmed: true
+      }).then(function (res) {
       if (res.ok) {
         input.dataset.lastRunAt = String(Date.now());
         updateScriptMeta(input);
@@ -1431,6 +1533,7 @@
         $("scriptStatus").textContent = text("\u811a\u672c\u6267\u884c\u5931\u8d25\uff1a") + (res.error || text("\u672a\u77e5\u9519\u8bef"));
       }
       return res;
+      });
     });
   }
 
@@ -1461,8 +1564,9 @@
   }
 
   function loadScriptRows() {
-    chrome.storage.local.get(["userScripts"], function (data) {
+    storageGet(["userScripts"], function (data) {
       var list = Array.isArray(data.userScripts) ? data.userScripts : [];
+      scriptMigrationNeeded = false;
       $("scriptList").textContent = "";
       if (!list.length) {
         addScriptRow();
@@ -1472,8 +1576,15 @@
       list.forEach(function (item) {
         addScriptRow(item);
       });
-      renderScriptFeatures(list);
-      $("scriptStatus").textContent = text("\u5df2\u6062\u590d\u4e0a\u6b21\u4fdd\u5b58\u7684\u811a\u672c\u3002");
+      var normalized = getSavedScriptRows();
+      renderScriptFeatures(normalized);
+      if (scriptMigrationNeeded) {
+        saveScriptRows(function () {
+          $("scriptStatus").textContent = text("\u65e7\u811a\u672c\u5df2\u8fc1\u79fb\u4e3a dom \u6743\u9650\uff0c\u4e0b\u6b21\u8fd0\u884c\u524d\u9700\u91cd\u65b0\u786e\u8ba4\u3002");
+        });
+      } else {
+        $("scriptStatus").textContent = text("\u5df2\u6062\u590d\u4e0a\u6b21\u4fdd\u5b58\u7684\u811a\u672c\u3002");
+      }
     });
   }
 
@@ -1483,6 +1594,7 @@
     var input = document.createElement("input");
     var enabledInput = document.createElement("input");
     var fileInput = document.createElement("input");
+    var authorizeBtn = document.createElement("button");
     var runBtn = document.createElement("button");
     var renameBtn = document.createElement("button");
     var removeBtn = document.createElement("button");
@@ -1494,35 +1606,53 @@
     enabledInput.checked = !savedScript || savedScript.enabled !== false;
     input.type = "text";
     input.readOnly = true;
+    input.dataset.scriptId = savedScript && savedScript.id || createScriptId();
+    if (savedScript && !savedScript.id) scriptMigrationNeeded = true;
+    input.dataset.permissionConfirmed = "false";
+    input.dataset.permissionSignature = "";
     input.placeholder = text("\u9009\u62e9\u672c\u5730 .js \u811a\u672c\u6587\u4ef6");
     if (savedScript && savedScript.code) {
       var savedMeta = savedScript.meta || parseUserScriptMeta(savedScript.code);
+      if (!Array.isArray(savedMeta.permissions) || !savedMeta.permissions.length) {
+        savedMeta.permissions = ["dom"];
+        savedScript.permissionConfirmed = false;
+        scriptMigrationNeeded = true;
+      }
       input.value = savedScript.name || savedMeta.name || text("\u5df2\u4fdd\u5b58\u811a\u672c");
       input.dataset.scriptName = input.value;
       input.dataset.scriptCode = String(savedScript.code || "");
       input.dataset.scriptMeta = JSON.stringify(savedMeta);
       input.dataset.savedAt = String(savedScript.savedAt || Date.now());
       input.dataset.lastRunAt = String(savedScript.lastRunAt || 0);
+      input.dataset.grantedOrigins = JSON.stringify(Array.isArray(savedScript.grantedOrigins) ? savedScript.grantedOrigins : []);
+      input.dataset.permissionSignature = permissionSignature(savedMeta);
+      input.dataset.permissionConfirmed = savedScript.permissionConfirmed === true && savedScript.permissionSignature === permissionSignature(savedMeta) ? "true" : "false";
     }
+    if (!input.dataset.grantedOrigins) input.dataset.grantedOrigins = "[]";
     fileInput.type = "file";
     fileInput.accept = ".js,text/javascript,application/javascript,text/plain";
     fileInput.style.display = "none";
     runBtn.type = "button";
+    authorizeBtn.type = "button";
     renameBtn.type = "button";
     removeBtn.type = "button";
     runBtn.className = "icon-btn";
+    authorizeBtn.className = "icon-btn";
     renameBtn.className = "icon-btn";
     removeBtn.className = "icon-btn";
     runBtn.title = text("\u6267\u884c");
+    authorizeBtn.title = text("\u6388\u6743\u5f53\u524d\u7f51\u7ad9\u81ea\u52a8\u8fd0\u884c");
     renameBtn.title = text("\u91cd\u547d\u540d");
     removeBtn.title = text("\u5220\u9664");
     runBtn.textContent = "\u25b6";
+    authorizeBtn.textContent = "\u6743";
     renameBtn.textContent = "\u6539";
     removeBtn.textContent = "Del";
     meta.className = "script-meta";
     wrap.appendChild(enabledInput);
     wrap.appendChild(input);
     wrap.appendChild(fileInput);
+    wrap.appendChild(authorizeBtn);
     wrap.appendChild(runBtn);
     wrap.appendChild(renameBtn);
     wrap.appendChild(removeBtn);
@@ -1542,6 +1672,53 @@
       saveScriptRows();
       if (!list.children.length) addScriptRow();
     });
+    authorizeBtn.addEventListener("click", function () {
+      var code = String(input.dataset.scriptCode || "");
+      if (!code) {
+        $("scriptStatus").textContent = text("\u8bf7\u5148\u9009\u62e9\u811a\u672c\u6587\u4ef6\u3002");
+        return;
+      }
+      confirmInputPermissions(input).then(function (permissionResult) {
+        if (!permissionResult.ok) {
+          $("scriptStatus").textContent = permissionResult.error;
+          return;
+        }
+        if (!userScriptsAvailable) {
+          $("scriptStatus").textContent = userScriptsEnableInstruction();
+          return;
+        }
+        return getCurrentSiteAccess().then(function (site) {
+        if (!site.ok) {
+          $("scriptStatus").textContent = site.error || text("\u5f53\u524d\u7f51\u7ad9\u6388\u6743\u5931\u8d25\u3002");
+          return;
+        }
+        var scriptMeta = permissionResult.meta;
+        if (hasBroadScriptPattern(scriptMeta)) {
+          $("scriptStatus").textContent = text("\u672c\u6279\u6b21\u4e0d\u5141\u8bb8 <all_urls> \u6216\u8de8\u7ad9\u901a\u914d\u6388\u6743\uff0c\u8bf7\u6539\u4e3a\u660e\u786e\u7f51\u7ad9\u3002");
+          return;
+        }
+        if (!scriptMetaMatchesUrl(scriptMeta, site.url || "")) {
+          $("scriptStatus").textContent = text("\u5f53\u524d\u7f51\u7ad9\u4e0d\u5728\u811a\u672c @match \u8303\u56f4\u5185\uff0c\u672a\u6388\u6743\u3002");
+          return;
+        }
+        ensureSiteAccess(site).then(function (grantedSite) {
+          if (!grantedSite.ok) {
+            $("scriptStatus").textContent = grantedSite.error || text("\u5f53\u524d\u7f51\u7ad9\u6388\u6743\u5931\u8d25\u3002");
+            return;
+          }
+          var origins = safeParseJson(input.dataset.grantedOrigins || "[]", []);
+          if (origins.indexOf(grantedSite.originPattern) < 0) origins.push(grantedSite.originPattern);
+          input.dataset.grantedOrigins = JSON.stringify(origins);
+          enabledInput.checked = true;
+          updateScriptMeta(input);
+          saveScriptRows(function () {
+            sendMessage({ action: "syncUserScripts" }).then(loadUserScriptsStatus);
+            $("scriptStatus").textContent = text("\u5df2\u6388\u6743\u5f53\u524d\u7f51\u7ad9\uff1a") + grantedSite.originPattern;
+          });
+        });
+        });
+      });
+    });
     input.addEventListener("click", function () {
       fileInput.click();
     });
@@ -1550,6 +1727,8 @@
       input.value = file ? file.name : "";
       input.dataset.scriptCode = "";
       input.dataset.lastRunAt = "0";
+      input.dataset.permissionConfirmed = "false";
+      input.dataset.permissionSignature = "";
       updateScriptMeta(input);
       if (!file) return;
       var reader = new FileReader();
@@ -1580,6 +1759,9 @@
         input.dataset.scriptCode = code;
         input.dataset.scriptName = displayName;
         input.dataset.scriptMeta = JSON.stringify(parsedMeta);
+        input.dataset.grantedOrigins = "[]";
+        input.dataset.permissionConfirmed = "false";
+        input.dataset.permissionSignature = permissionSignature(parsedMeta);
         input.dataset.savedAt = String(Date.now());
         input.dataset.lastRunAt = "0";
         updateScriptMeta(input);
@@ -1614,6 +1796,7 @@
   }
 
   function bindScripts() {
+    loadUserScriptsStatus();
     $("addScriptRowBtn").addEventListener("click", function (event) {
       event.preventDefault();
       event.stopPropagation();
@@ -1632,6 +1815,8 @@
       postScriptToWorkspace(lastWorkspaceScript);
     });
     window.addEventListener("message", function (event) {
+      var frame = $("scriptFrame");
+      if (!frame || event.source !== frame.contentWindow) return;
       var data = event.data || {};
       if (data.source === "DouyinPanelScript") {
         handleDouyinPanelMessage(data);
@@ -1639,8 +1824,6 @@
       }
       if (data.source !== "WinSpeedBallScriptWorkspace") return;
       if (data.type === "POINTER_MOVE") {
-        var frame = $("scriptFrame");
-        if (!frame || event.source !== frame.contentWindow) return;
         var rect = frame.getBoundingClientRect();
         document.dispatchEvent(new MouseEvent("mousemove", {
           clientX: rect.left + Number(data.clientX || 0),

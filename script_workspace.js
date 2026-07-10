@@ -235,6 +235,7 @@
   }, true);
 
   window.addEventListener("message", function (event) {
+    if (event.source !== window.parent) return;
     var data = event.data || {};
     if (data.source !== "WinSpeedBallPopup" || data.type !== "RUN_SCRIPT_UI") return;
     runScript(data);

@@ -3,25 +3,38 @@
 
   var latestSourceTime = 0;
   var runningSourceTime = 0;
+  var workerRequestSequence = 0;
 
   function report(message) {
     try {
-      chrome.runtime.sendMessage(message, function () {
+      var payload = {};
+      Object.keys(message || {}).forEach(function (key) {
+        if (key !== "action") payload[key] = message[key];
+      });
+      chrome.runtime.sendMessage({
+        version: 1,
+        action: String(message && message.action || ""),
+        source: "offscreen-ocr",
+        requestId: "offscreen-" + Date.now() + "-" + (++workerRequestSequence),
+        payload: payload
+      }, function () {
         void chrome.runtime.lastError;
       });
     } catch (e) {}
   }
 
   chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
-    if (!request || request.target !== "offscreen-ocr") return false;
+    if (!request || request.version !== 1 || request.source !== "background" || !request.payload || request.payload.target !== "offscreen-ocr") return false;
+    if (!sender || sender.id !== chrome.runtime.id || sender.tab) return false;
+    var payload = request.payload;
     if (request.action === "getOcrWorkerState") {
       sendResponse({ ok: true, runningSourceTime: runningSourceTime });
       return false;
     }
     if (request.action !== "recognizeCapture") return false;
 
-    var sourceTime = Number(request.sourceTime || 0);
-    var dataUrl = String(request.dataUrl || "");
+    var sourceTime = Number(payload.sourceTime || 0);
+    var dataUrl = String(payload.dataUrl || "");
     if (!sourceTime || !dataUrl || !window.winSpeedBallOcr) {
       sendResponse({ ok: false, error: "OCR job data is invalid." });
       return false;

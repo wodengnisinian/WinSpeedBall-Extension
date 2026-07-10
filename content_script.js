@@ -7,9 +7,15 @@
   // Guard: skip chrome:// and edge:// internal pages
   try { if (/^(chrome|edge|about|chrome-extension):\/\//i.test(location.href)) return; } catch (e) { return; }
 
-  if (window.__WinSpeedBallLoadedVersion === "2026-07-10-capture-style-v4") return;
-  window.__WinSpeedBallLoadedVersion = "2026-07-10-capture-style-v4";
+  if (window.__WinSpeedBallLoadedVersion === "2026-07-11-player-adapters-v1") return;
+  var playerAdapters = window.WinSpeedBallPlayerAdapters;
+  if (!playerAdapters || !playerAdapters.html5) {
+    console.warn("WinSpeedBall: player adapters are not loaded.");
+    return;
+  }
+  window.__WinSpeedBallLoadedVersion = "2026-07-11-player-adapters-v1";
   window.__WinSpeedBallLoaded = true;
+  var html5Adapter = playerAdapters.html5;
 
   var rate = 1.0;
   var muted = false;
@@ -19,9 +25,18 @@
   var keepPlaying = false;
   var lockTimer = null;
   var observerStarted = false;
-  var mutationScanTimer = null;
+  var registryInitialized = false;
+  var incrementalApplyTimer = null;
+  var lastIntegrityScan = 0;
   var regionCaptureActive = false;
+  var regionCaptureToken = "";
+  var contentRequestSequence = 0;
   var knownMedia = new WeakSet();
+  var mediaRegistry = new Set();
+  var observedRoots = new WeakSet();
+  var mediaObserver = null;
+  var pendingMedia = new Set();
+  var mediaMetrics = { initialScans: 0, incrementalScans: 0, integrityScans: 0, mutationBatches: 0, addedNodes: 0, observedRoots: 0 };
 
   function clamp(num, min, max) {
     return Math.max(min, Math.min(max, num));
@@ -43,152 +58,215 @@
     if (volume > 0) lastAudibleVolume = volume;
   }
 
+  function playbackState() {
+    return { rate: rate, muted: muted, volume: volume };
+  }
+
+  function isConnectedMedia(element) {
+    if (!html5Adapter.isMedia(element)) return false;
+    try {
+      return element.isConnected !== false && element.ownerDocument === document;
+    } catch (error) {
+      return true;
+    }
+  }
+
   function collectAll() {
+    ensureMediaRegistry();
+    runIntegrityScanIfStale();
+    pruneDisconnectedMedia();
     var all = [];
-    var seen = new Set();
-
-    function isControllableMedia(el) {
-      if (!el) return false;
-      try {
-        if (el instanceof HTMLMediaElement) return true;
-      } catch (e) {}
-      return /^(VIDEO|AUDIO)$/.test(el.tagName || "");
-    }
-
-    function add(el) {
-      if (isControllableMedia(el) && !seen.has(el)) {
-        seen.add(el);
-        registerMedia(el);
-        all.push(el);
-      }
-    }
-
-    function scan(root) {
-      if (!root || !root.querySelectorAll) return;
-      try {
-        root.querySelectorAll("video, audio").forEach(function (el) {
-          add(el);
-          try {
-            if (el.shadowRoot) scan(el.shadowRoot);
-          } catch (e) {}
-        });
-      } catch (e) {}
-
-      try {
-        root.querySelectorAll("*").forEach(function (el) {
-          try {
-            if (el.shadowRoot) scan(el.shadowRoot);
-          } catch (e) {}
-        });
-      } catch (e) {}
-    }
-
-    scan(document);
-
+    mediaRegistry.forEach(function (element) {
+      all.push(element);
+    });
     return all;
   }
 
-  function registerMedia(el) {
-    if (!el || knownMedia.has(el)) return;
-    knownMedia.add(el);
+  function pruneDisconnectedMedia() {
+    mediaRegistry.forEach(function (element) {
+      if (isConnectedMedia(element)) return;
+      mediaRegistry.delete(element);
+      pendingMedia.delete(element);
+    });
+  }
+
+  function registerMedia(element, discovered) {
+    if (!html5Adapter.isMedia(element)) return false;
+    var wasRegistered = mediaRegistry.has(element);
+    mediaRegistry.add(element);
+    if (!wasRegistered && discovered) discovered.push(element);
+    if (knownMedia.has(element)) return !wasRegistered;
+    knownMedia.add(element);
 
     ["loadedmetadata", "loadeddata", "canplay", "playing", "durationchange"].forEach(function (name) {
-      el.addEventListener(name, function () {
+      element.addEventListener(name, function () {
+        mediaRegistry.add(element);
         if (!active) return;
-        try { applyToMedia(el); } catch (e) {}
-        if (keepPlaying) tryPlayMedia(el);
+        try { applyToMedia(element); } catch (error) {}
+        if (keepPlaying) tryPlayMedia(element);
       }, true);
     });
 
-    el.addEventListener("ratechange", function () {
+    element.addEventListener("ratechange", function () {
       if (!active) return;
-      if (Math.abs(Number(el.playbackRate || 1) - rate) > 0.001) {
-        setTimeout(function () { try { el.playbackRate = rate; } catch (e) {} }, 0);
-        setTimeout(function () { try { el.playbackRate = rate; } catch (e) {} }, 120);
+      if (Math.abs(Number(element.playbackRate || 1) - rate) > 0.001) {
+        setTimeout(function () { try { element.playbackRate = rate; } catch (error) {} }, 0);
+        setTimeout(function () { try { element.playbackRate = rate; } catch (error) {} }, 120);
       }
     }, true);
 
-    el.addEventListener("volumechange", function () {
+    element.addEventListener("volumechange", function () {
       if (!active) return;
       var wantedVolume = muted ? 0 : volume;
-      if (el.muted !== muted || Math.abs(Number(el.volume || 0) - wantedVolume) > 0.001) {
+      if (element.muted !== muted || Math.abs(Number(element.volume || 0) - wantedVolume) > 0.001) {
         setTimeout(function () {
-          try { el.muted = muted; el.volume = wantedVolume; } catch (e) {}
+          try { element.muted = muted; element.volume = wantedVolume; } catch (error) {}
         }, 0);
       }
     }, true);
+    return !wasRegistered;
   }
 
-  function applyToMedia(el) {
-    registerMedia(el);
-    el.playbackRate = rate;
-    el.defaultPlaybackRate = rate;
-    el.muted = muted;
-    el.volume = muted ? 0 : volume;
+  function observeRoot(root, discovered) {
+    if (!root || !root.querySelectorAll || observedRoots.has(root)) return;
+    observedRoots.add(root);
+    mediaMetrics.observedRoots++;
+    if (!mediaObserver) mediaObserver = new MutationObserver(handleMediaMutations);
+    mediaObserver.observe(root, { childList: true, subtree: true });
+    scanNode(root, discovered, false);
   }
 
-  function applyToAll(ms) {
-    var applied = 0;
-    ms.forEach(function (el) {
+  function scanNode(node, discovered, incremental) {
+    if (!node) return;
+    if (incremental) mediaMetrics.incrementalScans++;
+    registerMedia(node, discovered);
+    try {
+      if (node.shadowRoot) observeRoot(node.shadowRoot, discovered);
+    } catch (error) {}
+    if (!node.querySelectorAll) return;
+    var descendants;
+    try {
+      descendants = node.querySelectorAll("*");
+    } catch (error) {
+      return;
+    }
+    descendants.forEach(function (element) {
+      registerMedia(element, discovered);
       try {
-        applyToMedia(el);
+        if (element.shadowRoot) observeRoot(element.shadowRoot, discovered);
+      } catch (error) {}
+    });
+  }
+
+  function queueDiscoveredMedia(discovered) {
+    discovered.forEach(function (element) { pendingMedia.add(element); });
+    if (!active) {
+      pendingMedia.clear();
+      return;
+    }
+    if (incrementalApplyTimer || !pendingMedia.size) return;
+    incrementalApplyTimer = setTimeout(function () {
+      incrementalApplyTimer = null;
+      var media = Array.from(pendingMedia).filter(isConnectedMedia);
+      pendingMedia.clear();
+      if (!active || !media.length) return;
+      applyToAll(media);
+      if (keepPlaying) playAll(media);
+    }, 50);
+  }
+
+  function handleMediaMutations(records) {
+    mediaMetrics.mutationBatches++;
+    var discovered = [];
+    (records || []).forEach(function (record) {
+      (record.addedNodes || []).forEach(function (node) {
+        mediaMetrics.addedNodes++;
+        scanNode(node, discovered, true);
+      });
+    });
+    pruneDisconnectedMedia();
+    queueDiscoveredMedia(discovered);
+  }
+
+  function ensureMediaRegistry() {
+    if (registryInitialized) return;
+    registryInitialized = true;
+    mediaMetrics.initialScans++;
+    lastIntegrityScan = Date.now();
+    observeRoot(document, []);
+  }
+
+  function runIntegrityScanIfStale() {
+    var now = Date.now();
+    if (now - lastIntegrityScan < 30000) return;
+    var discovered = [];
+    lastIntegrityScan = now;
+    mediaMetrics.integrityScans++;
+    scanNode(document, discovered, false);
+    queueDiscoveredMedia(discovered);
+  }
+  function applyToMedia(element) {
+    registerMedia(element);
+    html5Adapter.apply(element, playbackState());
+  }
+
+  function applyToAll(media) {
+    var applied = 0;
+    media.forEach(function (element) {
+      try {
+        applyToMedia(element);
         applied++;
-      } catch (e) {}
+      } catch (error) {}
     });
     return applied;
   }
 
-  function tryPlayMedia(el) {
-    try {
-      if (el.paused && el.readyState >= 2) {
-        var p = el.play();
-        if (p && p.catch) p.catch(function () {});
-      }
-    } catch (e) {}
+  function syncRegisteredMedia(media) {
+    var synchronized = 0;
+    var state = playbackState();
+    media.forEach(function (element) {
+      try {
+        if (!html5Adapter.needsSync(element, state)) return;
+        html5Adapter.apply(element, state);
+        synchronized++;
+      } catch (error) {}
+    });
+    return synchronized;
   }
 
-  function playAll(ms) {
+  function tryPlayMedia(element) {
+    html5Adapter.tryPlay(element);
+  }
+
+  function playAll(media) {
     var played = 0;
-    ms.forEach(function (el) {
+    var state = playbackState();
+    media.forEach(function (element) {
       try {
-        applyToMedia(el);
-        tryPlayMedia(el);
+        if (html5Adapter.needsSync(element, state)) html5Adapter.apply(element, state);
+        html5Adapter.tryPlay(element);
         played++;
-      } catch (e) {}
+      } catch (error) {}
     });
     return played;
   }
 
-  function detectSpecial() {
-    var result = { type: "" };
-    try {
-      if (window.RufflePlayer || document.querySelector("ruffle-player, ruffle-embed, ruffle-object")) {
-        result.type = "Ruffle/Flash";
-        result.reason = "检测到 Ruffle/Flash，可能不是标准 HTML5 视频";
-        return result;
-      }
-    } catch (e) {}
-
-    try {
-      if (!document.querySelector("video") && document.querySelector("canvas")) {
-        result.type = "Canvas";
-        result.reason = "检测到 Canvas 播放区域，可能无法完全控制";
-        return result;
-      }
-    } catch (e) {}
-
-    return result;
+  function detectSpecial(mediaCount) {
+    return playerAdapters.detectSpecial(document, window, mediaCount);
   }
 
-  function buildState(ms, applied) {
-    var mediaInfo = getPrimaryMediaInfo(ms);
+  function buildState(media, applied) {
+    var mediaInfo = getPrimaryMediaInfo(media);
+    var player = playerAdapters.identify(location);
     return {
       ok: true,
       rate: rate,
       muted: muted,
       volume: muted ? 0 : volume,
       keepPlaying: keepPlaying,
-      mediaCount: ms.length,
+      playerAdapter: player.id,
+      playerType: player.label,
+      mediaCount: media.length,
       applied: applied,
       duration: mediaInfo.duration,
       currentTime: mediaInfo.currentTime,
@@ -199,59 +277,30 @@
     };
   }
 
-  function safeNumber(n) {
-    n = Number(n);
-    return Number.isFinite(n) ? n : 0;
+  function getPrimaryMediaInfo(media) {
+    return html5Adapter.getInfo(choosePrimaryMedia(media));
   }
 
-  function getPrimaryMediaInfo(ms) {
-    var chosen = choosePrimaryMedia(ms);
-    if (!chosen) {
-      return { duration: 0, currentTime: 0, remainingTime: 0, paused: true, tag: "" };
-    }
-    var duration = safeNumber(chosen.duration);
-    var currentTime = safeNumber(chosen.currentTime);
-    return {
-      duration: duration,
-      currentTime: currentTime,
-      remainingTime: Math.max(0, duration - currentTime),
-      paused: !!chosen.paused,
-      tag: chosen.tagName ? chosen.tagName.toLowerCase() : ""
-    };
-  }
-
-  function choosePrimaryMedia(ms) {
+  function choosePrimaryMedia(media) {
     var best = null;
     var bestScore = -1;
-    ms.forEach(function (el, index) {
-      if (!el) return;
-      var rect = { width: 0, height: 0 };
-      try { rect = el.getBoundingClientRect(); } catch (e) {}
-      var area = Math.max(0, rect.width || 0) * Math.max(0, rect.height || 0);
-      var duration = safeNumber(el.duration);
-      var score = 0;
-      if (!el.paused) score += 1000000;
-      if (duration >= 8) score += 100000;
-      if ((el.tagName || "").toLowerCase() === "video") score += 50000;
-      score += Math.min(area, 500000);
-      score += Math.min(duration, 36000);
-      score -= index;
+    media.forEach(function (element, index) {
+      var score = html5Adapter.score(element, index);
       if (score > bestScore) {
         bestScore = score;
-        best = el;
+        best = element;
       }
     });
     return best;
   }
-
   function startLock() {
     active = true;
     if (lockTimer) return;
     lockTimer = setInterval(function () {
       if (!active) return;
-      var ms = collectAll();
-      applyToAll(ms);
-      if (keepPlaying) playAll(ms);
+      var media = collectAll();
+      syncRegisteredMedia(media);
+      if (keepPlaying) playAll(media);
     }, 1000);
   }
 
@@ -283,14 +332,16 @@
       return;
     }
     observerStarted = true;
-    new MutationObserver(function () {
-      if (!active) return;
-      if (mutationScanTimer) clearTimeout(mutationScanTimer);
-      mutationScanTimer = setTimeout(function () {
-        mutationScanTimer = null;
-        applyToAll(collectAll());
-      }, 300);
-    }).observe(root, { childList: true, subtree: true });
+    document.addEventListener("winspeedball-shadow-root-attached", function (event) {
+      var path = event && event.composedPath ? event.composedPath() : [];
+      var host = path && path.length ? path[0] : event && event.target;
+      var discovered = [];
+      try {
+        if (host && host.shadowRoot) observeRoot(host.shadowRoot, discovered);
+      } catch (error) {}
+      queueDiscoveredMedia(discovered);
+    }, true);
+    ensureMediaRegistry();
   }
 
   function extractPageText() {
@@ -316,7 +367,18 @@
   function sendRuntimeMessage(message) {
     return new Promise(function (resolve) {
       try {
-        chrome.runtime.sendMessage(message, function (response) {
+        message = message || {};
+        var payload = {};
+        Object.keys(message).forEach(function (key) {
+          if (key !== "action") payload[key] = message[key];
+        });
+        chrome.runtime.sendMessage({
+          version: 1,
+          action: String(message.action || ""),
+          source: "content",
+          requestId: "content-" + Date.now() + "-" + (++contentRequestSequence),
+          payload: payload
+        }, function (response) {
           if (chrome.runtime.lastError) {
             resolve({ ok: false, error: chrome.runtime.lastError.message });
             return;
@@ -357,9 +419,12 @@
     });
   }
 
-  function startRegionCapture() {
-    if (regionCaptureActive) return { ok: true, message: "already active" };
+  function startRegionCapture(captureToken) {
+    if (regionCaptureActive) return { ok: false, error: "Region capture is already active." };
+    captureToken = String(captureToken || "");
+    if (captureToken.length < 16) return { ok: false, error: "Capture authorization is invalid." };
     regionCaptureActive = true;
+    regionCaptureToken = captureToken;
 
     var startX = 0;
     var startY = 0;
@@ -367,7 +432,7 @@
     var dragging = false;
     var overlay = document.createElement("div");
     var selection = document.createElement("div");
-    sendRuntimeMessage({ action: "setCaptureIndicator", active: true });
+    sendRuntimeMessage({ action: "setCaptureIndicator", active: true, captureToken: captureToken });
 
     overlay.style.cssText = [
       "position:fixed",
@@ -386,7 +451,7 @@
       "pointer-events:none"
     ].join(";");
     try {
-      chrome.storage.local.get(["captureSelectionTone", "captureSelectionWidth"], function (data) {
+      sendRuntimeMessage({ action: "getCapturePreferences" }).then(function (data) {
         var tone = Number(data && data.captureSelectionTone);
         var width = Number(data && data.captureSelectionWidth);
         if (!Number.isFinite(tone)) tone = 96;
@@ -401,14 +466,16 @@
     document.documentElement.appendChild(selection);
 
     function cleanup(keepIndicator) {
+      var cleanupToken = regionCaptureToken;
       regionCaptureActive = false;
+      regionCaptureToken = "";
       document.removeEventListener("keydown", onKeyDown, true);
       document.removeEventListener("mousedown", onMouseDown, true);
       document.removeEventListener("mousemove", onMouseMove, true);
       document.removeEventListener("mouseup", onMouseUp, true);
       if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
       if (selection.parentNode) selection.parentNode.removeChild(selection);
-      if (!keepIndicator) sendRuntimeMessage({ action: "setCaptureIndicator", active: false });
+      if (!keepIndicator) sendRuntimeMessage({ action: "setCaptureIndicator", active: false, captureToken: cleanupToken });
     }
 
     function onKeyDown(event) {
@@ -456,20 +523,21 @@
       }
 
       var rect = currentRect;
+      var token = regionCaptureToken;
       cleanup(true);
       setTimeout(function () {
-        sendRuntimeMessage({ action: "captureVisiblePage" }).then(function (res) {
+        sendRuntimeMessage({ action: "captureVisiblePage", captureToken: token }).then(function (res) {
           if (!res.ok || !res.dataUrl) {
-            sendRuntimeMessage({ action: "setCaptureIndicator", active: false });
+            sendRuntimeMessage({ action: "setCaptureIndicator", active: false, captureToken: token });
             return;
           }
           cropDataUrl(res.dataUrl, rect).then(function (cropped) {
             if (!cropped) {
-              sendRuntimeMessage({ action: "setCaptureIndicator", active: false });
+              sendRuntimeMessage({ action: "setCaptureIndicator", active: false, captureToken: token });
               return;
             }
-            sendRuntimeMessage({ action: "saveManualCapture", dataUrl: cropped }).then(function (saveRes) {
-              sendRuntimeMessage({ action: "setCaptureIndicator", active: false });
+            sendRuntimeMessage({ action: "saveManualCapture", dataUrl: cropped, captureToken: token }).then(function (saveRes) {
+              sendRuntimeMessage({ action: "setCaptureIndicator", active: false, captureToken: token });
               if (!saveRes || !saveRes.ok) {
                 console.warn("WinSpeedBall: capture could not be saved", saveRes && saveRes.error);
               }
@@ -563,7 +631,7 @@
       case "GET_STATUS":
         ms = collectAll();
         var status = buildState(ms, 0);
-        var special = detectSpecial();
+        var special = detectSpecial(ms.length);
         if (special.type) {
           status.specialPlayerDetected = true;
           status.specialPlayerType = special.type;
@@ -609,20 +677,22 @@
   }, true);
 
   chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
-    if (!request) {
-      sendResponse({ ok: false, error: "Empty command.", mediaCount: 0, applied: 0, frameResults: [] });
+    if (!request || request.version !== 1 || request.source !== "background" || !request.payload || !sender || sender.id !== chrome.runtime.id || sender.tab) {
+      sendResponse({ ok: false, error: "Unauthorized command.", mediaCount: 0, applied: 0, frameResults: [] });
       return true;
     }
-    sendResponse(handleCommand(request));
+    sendResponse(handleCommand(request.payload.command));
     return true;
   });
 
   window.winSpeedBall = {
     handleCommand: handleCommand,
-    startRegionCapture: startRegionCapture
+    startRegionCapture: startRegionCapture,
+    getMediaDebugState: function () {
+      return Object.assign({}, mediaMetrics, {
+        registeredMedia: collectAll().length
+      });
+    }
   };
 
-  setTimeout(function () {
-    sendRuntimeMessage({ action: "runMatchingUserScripts", url: location.href });
-  }, 50);
 })();
