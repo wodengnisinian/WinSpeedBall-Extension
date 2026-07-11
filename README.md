@@ -11,6 +11,9 @@
 - 图书手动翻页和后台自动翻页
 - 按“视频、OCR、AI、图书、脚本、其他”分类运行本地脚本
 - 详细任务日志和截图、OCR、AI 状态追踪
+- 本地用户注册、登录、退出、资料修改、改密和账户删除
+- 首次使用声明、禁止用途说明和版本化确认记录
+- 顶部固定按钮，可将浏览器原生弹窗打开为持续停留的独立小窗口
 
 ## 在 Microsoft Edge 中安装
 
@@ -53,6 +56,15 @@
 
 旧版 DeepSeek 配置会自动迁移。升级后请在设置页点击一次“保存”，让浏览器确认当前 AI 服务地址的访问权限。
 
+## 账户与使用声明
+
+- 当前账户为本地账户，只在当前浏览器配置中有效，不支持云同步、订阅结算或在线找回密码。
+- 密码使用随机盐和 PBKDF2-SHA-256 摘要保存，不保存明文；登录会话只保存在浏览器临时会话区。
+- 用户可以注册、登录、退出、修改显示名称、修改密码和删除本地账户。
+- 使用声明会记录版本、内容摘要和确认时间。声明更新后需要重新确认。
+- 声明用于解释产品用途、禁止行为、数据处理和使用责任，不是不可篡改的司法存证，也不能替代正式法律意见。
+- 完整文档见 [`PRIVACY.md`](PRIVACY.md) 和 [`docs/usage-declaration.md`](docs/usage-declaration.md)。
+
 ## 隐私说明
 
 - 截图和 OCR 结果默认保存在本机浏览器扩展存储中。
@@ -60,11 +72,15 @@
 - 只有启用自动发送或手动点击发送时，识别后的文字才会发送到用户配置的 AI 服务。
 - API Key 保存在当前浏览器的受信任扩展存储中，不会向网页内容脚本开放，也不会写入日志。
 - 日志记录任务编号、状态、耗时和文字数量，不记录完整 OCR 内容或 API Key。
+- 本地账户不要求邮箱或手机号；用户名和密码摘要不会上传到项目服务器。
 
 ## 项目模块
 
 - `background.js`：扩展生命周期、标签页控制、OCR 和自动翻页编排。
 - `background/storage-service.js`：本地存储、后台日志和截图 IndexedDB。
+- `background/declaration-service.js`：使用声明内容、版本、摘要和确认记录。
+- `background/user-service.js`：本地账户、密码摘要、登录会话和账户生命周期。
+- `background/window-service.js`：固定窗口创建、复用、聚焦和关闭状态清理。
 - `background/ai-providers.js`：不同 AI 服务的请求协议、响应解析、超时和安全校验。
 - `background/ai-service.js`：AI Provider 选择、独立配置、旧数据迁移和 OCR 结果关联。
 - `background/ocr-service.js`：离屏 OCR 调度、任务状态、结果处理和自动 AI。
@@ -89,6 +105,9 @@
 ```powershell
 node --check background.js
 node --check background/storage-service.js
+node --check background/declaration-service.js
+node --check background/user-service.js
+node --check background/window-service.js
 node --check background/ai-providers.js
 node --check background/ai-service.js
 node --check background/ocr-service.js
@@ -113,6 +132,8 @@ AI Provider、旧配置迁移和消息兼容测试：
 
 ```powershell
 node --test tests/ai-provider.test.js
+node --test tests/user-declaration.test.js
+node --test tests/window-service.test.js
 ```
 
 `docs/ocr-runtime-test.html` 用于验证项目内置 Tesseract、WASM 核心和英文语言包能否实际识别测试图片。

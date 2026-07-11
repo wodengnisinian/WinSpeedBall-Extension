@@ -25,7 +25,16 @@
           resolve({ ok: false, error: chrome.runtime.lastError.message });
           return;
         }
-        resolve(response || { ok: false, error: "扩展后台无响应" });
+        var result = response || { ok: false, error: "扩展后台无响应" };
+        if (result.ok === false && (result.error === "Unknown action." || result.error === "Unsupported message version.")) {
+          resolve({
+            ok: false,
+            code: "BACKGROUND_RELOAD_REQUIRED",
+            error: "扩展后台仍是旧版本，请重新加载扩展后再打开弹窗。"
+          });
+          return;
+        }
+        resolve(result);
       });
     });
   }

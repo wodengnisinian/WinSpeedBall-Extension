@@ -28,6 +28,9 @@
   var autoSendOcrToAi = false;
   var autoOcrPromptTemplate = "";
   var aiProviderOptions = [];
+  var usageDeclaration = null;
+  var currentUserSession = null;
+  var isPinnedWindow = new URLSearchParams(window.location.search).get("pinned") === "1";
   var AI_PROVIDER_FALLBACKS = [
     { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", requiresApiKey: true },
     { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-5.4-mini", requiresApiKey: true },
@@ -60,6 +63,55 @@
     right: { width: 32, top: 0, bottom: 320 },
     top: { height: 32, left: 0, right: 380 }
   };
+
+  if (isPinnedWindow) document.body.classList.add("pinned-window");
+
+  function openPinnedWindowDirectly() {
+    return new Promise(function (resolve) {
+      try {
+        chrome.windows.create({
+          url: chrome.runtime.getURL("popup.html?pinned=1"),
+          type: "popup",
+          focused: true,
+          width: 400,
+          height: 420
+        }, function (created) {
+          var error = chrome.runtime.lastError && chrome.runtime.lastError.message;
+          resolve(error || !created
+            ? { ok: false, error: error || "无法创建固定窗口。" }
+            : { ok: true, pinned: true, windowId: created.id, fallback: true });
+        });
+      } catch (error) {
+        resolve({ ok: false, error: error.message || String(error) });
+      }
+    });
+  }
+
+  function bindPinnedWindow() {
+    var button = $("pinWindowBtn");
+    button.classList.toggle("active", isPinnedWindow);
+    button.title = isPinnedWindow ? "关闭固定窗口" : "固定为独立窗口";
+    button.setAttribute("aria-label", button.title);
+    button.addEventListener("click", function () {
+      if (isPinnedWindow) {
+        window.close();
+        return;
+      }
+      button.disabled = true;
+      button.title = "正在打开固定窗口...";
+      sendMessage({ action: "openPinnedWindow" }).then(function (response) {
+        if (!response.ok) return openPinnedWindowDirectly();
+        return response;
+      }).then(function (response) {
+        if (response.ok) {
+          window.close();
+          return;
+        }
+        button.disabled = false;
+        button.title = "固定失败：" + (response.error || "未知错误");
+      });
+    });
+  }
 
   function applyNavTransition() {
     document.body.style.setProperty("--nav-transition", navTransitionMs + "ms");
@@ -1001,6 +1053,240 @@
     });
   }
 
+  function renderDeclarationSections(containerId, sections) {
+    var container = $(containerId);
+    if (!container) return;
+    container.innerHTML = "";
+    (Array.isArray(sections) ? sections : []).forEach(function (section) {
+      var wrapper = document.createElement("div");
+      wrapper.className = "declaration-section";
+      var title = document.createElement("h3");
+      title.textContent = String(section && section.title || "");
+      wrapper.appendChild(title);
+      var list = document.createElement("ul");
+      (section && Array.isArray(section.items) ? section.items : []).forEach(function (item) {
+        var entry = document.createElement("li");
+        entry.textContent = String(item || "");
+        list.appendChild(entry);
+      });
+      wrapper.appendChild(list);
+      container.appendChild(wrapper);
+    });
+  }
+
+  function showDeclarationGate(visible) {
+    var gate = $("declarationGate");
+    if (gate) gate.classList.toggle("hidden", !visible);
+  }
+
+  function declarationAcceptedLabel(response) {
+    var acceptance = response && response.acceptance;
+    if (!response || !response.accepted || !acceptance) return "尚未确认当前版本声明。";
+    var acceptedAt = acceptance.acceptedAt ? new Date(acceptance.acceptedAt).toLocaleString() : "未知时间";
+    return "已确认版本 " + response.version + "，时间：" + acceptedAt + "。";
+  }
+
+  function renderUsageDeclaration(response) {
+    usageDeclaration = response;
+    if ($("declarationTitle")) $("declarationTitle").textContent = response.title + "（" + response.version + "）";
+    if ($("declarationSummary")) $("declarationSummary").textContent = response.summary;
+    if ($("declarationGateTitle")) $("declarationGateTitle").textContent = response.title;
+    if ($("declarationGateSummary")) $("declarationGateSummary").textContent = response.summary;
+    renderDeclarationSections("declarationSections", response.sections);
+    renderDeclarationSections("declarationGateSections", response.sections);
+    if ($("declarationAcceptanceStatus")) $("declarationAcceptanceStatus").textContent = declarationAcceptedLabel(response);
+    if ($("declarationPanelCheckbox")) $("declarationPanelCheckbox").checked = response.accepted === true;
+    if ($("declarationGateCheckbox")) $("declarationGateCheckbox").checked = false;
+    showDeclarationGate(response.accepted !== true);
+  }
+
+  function loadUsageDeclaration() {
+    return sendMessage({ action: "getUsageDeclaration" }).then(function (response) {
+      if (!response.ok) {
+        $("declarationGateStatus").textContent = "声明读取失败：" + (response.error || "未知错误");
+        $("declarationAcceptanceStatus").textContent = "声明读取失败：" + (response.error || "未知错误");
+        $("reloadExtensionBtn").classList.toggle("hidden", response.code !== "BACKGROUND_RELOAD_REQUIRED");
+        showDeclarationGate(true);
+        return response;
+      }
+      $("reloadExtensionBtn").classList.add("hidden");
+      renderUsageDeclaration(response);
+      return response;
+    });
+  }
+
+  function acceptUsageDeclaration(checkboxId, buttonId, statusId) {
+    var checkbox = $(checkboxId);
+    var button = $(buttonId);
+    var status = $(statusId);
+    if (!usageDeclaration || !usageDeclaration.version) {
+      status.textContent = "声明尚未加载，请稍后再试。";
+      return Promise.resolve({ ok: false });
+    }
+    if (!checkbox.checked) {
+      status.textContent = "请先勾选已阅读并同意。";
+      return Promise.resolve({ ok: false });
+    }
+    button.disabled = true;
+    status.textContent = "正在记录确认信息...";
+    return sendMessage({
+      action: "acceptUsageDeclaration",
+      payload: { version: usageDeclaration.version, accepted: true }
+    }).then(function (response) {
+      button.disabled = false;
+      if (!response.ok) {
+        status.textContent = "确认失败：" + (response.error || "未知错误");
+        if (response.code === "DECLARATION_UPDATED") loadUsageDeclaration();
+        return response;
+      }
+      status.textContent = "声明已确认。";
+      return loadUsageDeclaration();
+    });
+  }
+
+  function bindDeclaration() {
+    $("acceptDeclarationGateBtn").addEventListener("click", function () {
+      acceptUsageDeclaration("declarationGateCheckbox", "acceptDeclarationGateBtn", "declarationGateStatus");
+    });
+    $("acceptDeclarationPanelBtn").addEventListener("click", function () {
+      acceptUsageDeclaration("declarationPanelCheckbox", "acceptDeclarationPanelBtn", "declarationAcceptanceStatus");
+    });
+    $("declineDeclarationBtn").addEventListener("click", function () { window.close(); });
+    $("reloadExtensionBtn").addEventListener("click", function () {
+      $("declarationGateStatus").textContent = "正在重新加载扩展，请稍后重新打开弹窗。";
+      chrome.runtime.reload();
+    });
+  }
+
+  function planLabel(plan) {
+    if (plan === "pro") return "Pro";
+    if (plan === "free") return "免费用户";
+    return "游客模式";
+  }
+
+  function renderUserSession(response) {
+    currentUserSession = response;
+    var authenticated = !!response.authenticated;
+    var user = response.user || {};
+    $("accountGuestView").classList.toggle("hidden", authenticated);
+    $("accountUserView").classList.toggle("hidden", !authenticated);
+    $("headerAccountLabel").textContent = authenticated ? (user.displayName || user.username) + " · " + planLabel(user.plan) : "游客模式";
+    if (!authenticated) {
+      $("accountStatus").textContent = "当前为游客模式。注册或登录后可建立本地用户身份；功能数据仍保存在当前浏览器。";
+      return;
+    }
+    $("accountNameValue").textContent = user.displayName || user.username || "-";
+    $("accountPlanValue").textContent = planLabel(user.plan);
+    var quotaSuffix = user.quota && user.quota.enforced === false ? "（未启用）" : "";
+    $("accountOcrQuotaValue").textContent = String(user.quota && user.quota.dailyOCR != null ? user.quota.dailyOCR : "-") + quotaSuffix;
+    $("accountAiQuotaValue").textContent = String(user.quota && user.quota.dailyAI != null ? user.quota.dailyAI : "-") + quotaSuffix;
+    $("profileDisplayNameInput").value = user.displayName || user.username || "";
+    $("accountStatus").textContent = "已登录本地账户 " + user.username + "。会话在浏览器关闭后失效。";
+  }
+
+  function loadUserSession() {
+    return sendMessage({ action: "getUserSession" }).then(function (response) {
+      if (!response.ok) {
+        $("accountStatus").textContent = "账户状态读取失败：" + (response.error || "未知错误");
+        return response;
+      }
+      renderUserSession(response);
+      return response;
+    });
+  }
+
+  function clearAccountPasswords() {
+    ["loginPasswordInput", "registerPasswordInput", "registerPasswordConfirmInput", "currentPasswordInput", "newPasswordInput", "newPasswordConfirmInput", "deletePasswordInput"].forEach(function (id) {
+      if ($(id)) $(id).value = "";
+    });
+  }
+
+  function bindAccount() {
+    $("loginUserBtn").addEventListener("click", function () {
+      $("accountStatus").textContent = "正在登录...";
+      sendMessage({ action: "loginUser", payload: {
+        username: $("loginUsernameInput").value.trim(),
+        password: $("loginPasswordInput").value
+      } }).then(function (response) {
+        clearAccountPasswords();
+        if (!response.ok) {
+          $("accountStatus").textContent = "登录失败：" + (response.error || "未知错误");
+          return;
+        }
+        renderUserSession(response);
+      });
+    });
+    $("registerUserBtn").addEventListener("click", function () {
+      var password = $("registerPasswordInput").value;
+      if (password !== $("registerPasswordConfirmInput").value) {
+        $("accountStatus").textContent = "两次输入的密码不一致。";
+        return;
+      }
+      $("accountStatus").textContent = "正在创建本地账户...";
+      var registerPayload = {
+        username: $("registerUsernameInput").value.trim(),
+        password: password
+      };
+      var displayName = $("registerDisplayNameInput").value.trim();
+      if (displayName) registerPayload.displayName = displayName;
+      sendMessage({ action: "registerUser", payload: registerPayload }).then(function (response) {
+        clearAccountPasswords();
+        if (!response.ok) {
+          $("accountStatus").textContent = "注册失败：" + (response.error || "未知错误");
+          if (response.code === "DECLARATION_REQUIRED") showPanel("declarationPanel", true);
+          return;
+        }
+        renderUserSession(response);
+      });
+    });
+    $("logoutUserBtn").addEventListener("click", function () {
+      sendMessage({ action: "logoutUser" }).then(function (response) {
+        clearAccountPasswords();
+        if (response.ok) renderUserSession(response);
+        else $("accountStatus").textContent = "退出失败：" + (response.error || "未知错误");
+      });
+    });
+    $("updateProfileBtn").addEventListener("click", function () {
+      sendMessage({ action: "updateUserProfile", payload: { displayName: $("profileDisplayNameInput").value.trim() } }).then(function (response) {
+        if (response.ok) renderUserSession(response);
+        else $("accountStatus").textContent = "资料保存失败：" + (response.error || "未知错误");
+      });
+    });
+    $("changePasswordBtn").addEventListener("click", function () {
+      var nextPassword = $("newPasswordInput").value;
+      if (nextPassword !== $("newPasswordConfirmInput").value) {
+        $("accountStatus").textContent = "两次输入的新密码不一致。";
+        return;
+      }
+      sendMessage({ action: "changeUserPassword", payload: {
+        currentPassword: $("currentPasswordInput").value,
+        newPassword: nextPassword
+      } }).then(function (response) {
+        clearAccountPasswords();
+        if (response.ok) {
+          renderUserSession(response);
+          $("accountStatus").textContent = "密码已修改，会话已刷新。";
+        } else $("accountStatus").textContent = "密码修改失败：" + (response.error || "未知错误");
+      });
+    });
+    $("deleteUserBtn").addEventListener("click", function () {
+      sendMessage({ action: "deleteUserAccount", payload: {
+        password: $("deletePasswordInput").value,
+        confirm: $("deleteConfirmInput").value.trim()
+      } }).then(function (response) {
+        clearAccountPasswords();
+        $("deleteConfirmInput").value = "";
+        if (response.ok) {
+          renderUserSession(response);
+          $("accountStatus").textContent = "本地账户已删除。其他功能数据未被删除。";
+        } else $("accountStatus").textContent = "删除失败：" + (response.error || "未知错误");
+      });
+    });
+    ["loginUsernameInput", "loginPasswordInput"].forEach(function (id) {
+      $(id).addEventListener("keydown", function (event) { if (event.key === "Enter") $("loginUserBtn").click(); });
+    });
+  }
+
   function bindVideo() {
     $("applyRateBtn").addEventListener("click", function () {
       var rate = Number($("rateInput").value);
@@ -1839,17 +2125,22 @@
   }
 
   bindPanels();
+  bindPinnedWindow();
   bindScriptWorkspaceNav();
   bindVideo();
   bindOcr();
   bindAi();
   bindBook();
+  bindAccount();
+  bindDeclaration();
   bindSettings();
   bindScripts();
   bindLogs();
   loadLogs();
   restorePopupStateOnOpen();
   loadSettings();
+  loadUsageDeclaration();
+  loadUserSession();
   loadManualCapture();
   loadAiHistory();
   control({ type: "GET_STATUS" });

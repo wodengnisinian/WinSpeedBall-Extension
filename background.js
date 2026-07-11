@@ -1,4 +1,7 @@
 importScripts("background/storage-service.js");
+importScripts("background/declaration-service.js");
+importScripts("background/user-service.js");
+importScripts("background/window-service.js");
 importScripts("background/ai-providers.js");
 importScripts("background/ai-service.js");
 importScripts("background/ocr-service.js");
@@ -29,6 +32,9 @@ importScripts("background/user-script-service.js");
   var restrictStorageAccess = self.WinSpeedBallStorageService.restrictAccess;
   var appendBackgroundLog = self.WinSpeedBallStorageService.appendLog;
   var saveCaptureRecord = self.WinSpeedBallStorageService.saveCaptureRecord;
+  var declarationService = self.WinSpeedBallDeclarationService;
+  var userService = self.WinSpeedBallUserService;
+  var windowService = self.WinSpeedBallWindowService;
   var callAi = self.WinSpeedBallAiService.call;
   var saveAiSettings = self.WinSpeedBallAiService.saveSettings;
   var ocrService = self.WinSpeedBallOcrService;
@@ -825,6 +831,24 @@ importScripts("background/user-script-service.js");
     },
     saveManualCapture: function (request, sender, respond) { saveManualCapture(request, sender, respond); },
     getManualCapture: function (request, sender, respond) { getManualCapture(respond); },
+    getUsageDeclaration: function () { return declarationService.get(); },
+    acceptUsageDeclaration: function (request) {
+      return userService.getSession().then(function (session) {
+        return declarationService.accept({
+          version: request.version,
+          accepted: request.accepted,
+          actorUserId: session && session.authenticated && session.user ? session.user.userId : "guest"
+        });
+      });
+    },
+    getUserSession: function () { return userService.getSession(); },
+    openPinnedWindow: function () { return windowService.openPinnedWindow(); },
+    registerUser: function (request) { return userService.register(request); },
+    loginUser: function (request) { return userService.login(request); },
+    logoutUser: function () { return userService.logout(); },
+    updateUserProfile: function (request) { return userService.updateProfile(request); },
+    changeUserPassword: function (request) { return userService.changePassword(request); },
+    deleteUserAccount: function (request) { return userService.deleteAccount(request); },
     saveAiSettings: function (request, sender, respond) { saveAiSettings(request, respond); },
     saveApiKey: function (request, sender, respond) { saveAiSettings(request, respond); },
     getSettings: function (request, sender, respond) { getSettings(respond); },

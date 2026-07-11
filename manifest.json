@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "minimum_chrome_version": "135",
   "name": "WinSpeedBall",
-  "version": "3.3.0",
-  "description": "Browser extension for video speed, volume, screenshot OCR, and configurable AI study assistance.",
+  "version": "3.4.0",
+  "description": "AI study assistant with video tools, OCR, configurable AI, local accounts, and usage disclosure.",
   "permissions": ["activeTab", "scripting", "storage", "alarms", "offscreen", "userScripts"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
   "background": {

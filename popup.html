@@ -6,7 +6,7 @@
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
     body{--nav-transition:180ms;width:380px;height:320px;overflow:hidden;font-family:"Segoe UI","Microsoft YaHei",sans-serif;background:#0f1419;color:#d9e2ec;font-size:12px}
-    .header{height:32px;padding:0 9px;border-bottom:1px solid #243244;background:#0c1117;display:flex;align-items:center;justify-content:space-between;transition:transform var(--nav-transition) ease,box-shadow var(--nav-transition) ease,opacity var(--nav-transition) ease}
+    .header{height:32px;padding:0 7px 0 9px;border-bottom:1px solid #243244;background:#0c1117;display:flex;align-items:center;justify-content:space-between;transition:transform var(--nav-transition) ease,box-shadow var(--nav-transition) ease,opacity var(--nav-transition) ease}.header-actions{display:flex;align-items:center;gap:5px;min-width:0}.header-account{font-size:10px;color:#8fa8bf;max-width:125px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pin-btn{width:25px;height:25px;border:1px solid transparent;border-radius:6px;background:transparent;color:#9db0c2;cursor:pointer;font-size:14px;line-height:1}.pin-btn:hover,.pin-btn.active{background:#1d4f7a;border-color:#2f80d0;color:#fff}.pin-btn:disabled{opacity:.5;cursor:default}
     h1{font-size:14px;color:#7cc4ff;font-weight:700}
     .layout{height:288px;display:grid;grid-template-columns:70px 1fr 66px;position:relative;transition:grid-template-columns var(--nav-transition) ease}.side{background:#0b1118;padding:6px;display:flex;flex-direction:column;gap:5px;overflow-y:auto;scrollbar-width:thin;transition:transform var(--nav-transition) ease,box-shadow var(--nav-transition) ease,opacity var(--nav-transition) ease}.left-side{border-right:1px solid #243244}.right-side{border-left:1px solid #243244}
     .side-btn{height:29px;border:1px solid transparent;border-radius:6px;background:transparent;color:#aab8c6;cursor:pointer;font-size:12px;text-align:left;padding:0 6px}
@@ -14,7 +14,7 @@
     .side-sep{height:1px;background:#9aa8b6;opacity:.55;margin:3px 2px}
     .content{min-height:0;overflow-y:auto;overflow-x:hidden;padding:7px;scrollbar-width:thin}.panel{display:none;min-height:0}.panel.active{display:block}
     body.chrome-hidden .header{position:absolute;left:0;right:0;top:0;z-index:45;transform:translateY(-34px);opacity:0;box-shadow:0 8px 18px rgba(0,0,0,.32)}body.chrome-hidden.top-open .header{transform:translateY(0);opacity:1}
-    body.chrome-hidden .layout{height:320px;grid-template-columns:0 1fr 0}body.chrome-hidden .side{position:absolute;top:0;bottom:0;width:70px;z-index:40;opacity:0;box-shadow:8px 0 18px rgba(0,0,0,.32)}body.chrome-hidden .left-side{left:0;transform:translateX(-72px)}body.chrome-hidden .right-side{right:0;transform:translateX(72px);box-shadow:-8px 0 18px rgba(0,0,0,.32)}body.chrome-hidden .content{grid-column:2;padding-left:6px;padding-right:6px}body.chrome-hidden.nav-open .left-side{transform:translateX(0);opacity:1}body.chrome-hidden.right-open .right-side{transform:translateX(0);opacity:1}
+    body.chrome-hidden .layout{height:320px;grid-template-columns:0 1fr 0}body.chrome-hidden .side{position:absolute;top:0;bottom:0;width:70px;z-index:40;opacity:0;box-shadow:8px 0 18px rgba(0,0,0,.32)}body.chrome-hidden .left-side{left:0;transform:translateX(-72px)}body.chrome-hidden .right-side{right:0;transform:translateX(72px);box-shadow:-8px 0 18px rgba(0,0,0,.32)}body.chrome-hidden .content{grid-column:2;padding-left:6px;padding-right:6px}body.chrome-hidden.nav-open .left-side{transform:translateX(0);opacity:1}body.chrome-hidden.right-open .right-side{transform:translateX(0);opacity:1}body.pinned-window{width:100vw;height:100vh;min-width:380px;min-height:320px}body.pinned-window.chrome-hidden .layout{height:100vh}body.pinned-window.chrome-hidden.top-open .layout{height:calc(100vh - 32px);margin-top:32px}
     details.fold{border:1px solid #223044;border-radius:7px;background:#101923;margin-bottom:8px;overflow:hidden}
     details.fold>summary{min-height:30px;padding:0 8px;display:flex;align-items:center;justify-content:space-between;list-style:none;cursor:pointer;color:#d9e2ec;font-weight:650}
     details.fold>summary::-webkit-details-marker{display:none}details.fold>summary::after{content:"\5C55\5F00";color:#7f92a5;font-size:10px;font-weight:500}details.fold[open]>summary::after{content:"\6536\8D77"}
@@ -33,12 +33,12 @@
     .status-label{color:#7f92a5;font-size:9px;margin-bottom:3px;white-space:nowrap}.status-value{color:#eef5fb;font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .message{min-height:34px;max-height:120px;overflow:auto;border:1px solid #263241;border-radius:6px;background:#111922;color:#aab8c6;padding:6px;line-height:1.4;white-space:pre-wrap;word-break:break-word;scrollbar-width:thin}.log-panel{height:100%;min-height:0}.log-panel>details{height:100%;margin:0;display:flex;flex-direction:column}.log-panel>details>.fold-body{flex:1;min-height:0;display:flex;flex-direction:column;padding-bottom:7px}.log-panel .message{flex:1;min-height:220px;max-height:none;overflow-x:hidden;overflow-y:auto}.log-panel .row{flex:0 0 auto;margin:6px 0 0}
     .toggle-row{display:flex;align-items:center;gap:8px;min-height:30px;color:#d9e2ec}.toggle-row input{width:18px;height:18px;flex:0 0 18px;padding:0;accent-color:#2f80d0}.toggle-row span{line-height:1.4}
-    .preview{width:100%;max-height:100px;object-fit:contain;border:1px solid #263241;border-radius:6px;background:#080d12;display:none;margin-bottom:5px}.hint{color:#6f8193;font-size:11px;line-height:1.4}
+    .preview{width:100%;max-height:100px;object-fit:contain;border:1px solid #263241;border-radius:6px;background:#080d12;display:none;margin-bottom:5px}.hint{color:#6f8193;font-size:11px;line-height:1.4}.hidden{display:none!important}.account-summary{display:grid;grid-template-columns:repeat(2,1fr);gap:5px;margin-bottom:8px}.account-card{border:1px solid #26384b;border-radius:6px;background:#0c151f;padding:7px}.account-card-label{font-size:10px;color:#7f92a5;margin-bottom:3px}.account-card-value{font-weight:700;color:#eef5fb;word-break:break-all}.declaration-content{display:grid;gap:7px}.declaration-section{border:1px solid #26384b;border-radius:6px;background:#0c151f;padding:7px}.declaration-section h3{font-size:11px;color:#9bcfff;margin-bottom:4px}.declaration-section ul{padding-left:16px;color:#aab8c6;line-height:1.45}.declaration-check{display:flex;gap:7px;align-items:flex-start;margin:8px 0;color:#d9e2ec;line-height:1.4}.declaration-check input{width:18px;height:18px;flex:0 0 18px;accent-color:#2f80d0}.consent-gate{position:fixed;inset:0;z-index:200;background:rgba(5,9,14,.96);display:flex;align-items:stretch;padding:10px}.consent-card{width:100%;border:1px solid #36536d;border-radius:9px;background:#0f1822;display:flex;flex-direction:column;min-height:0;padding:10px}.consent-title{font-size:14px;color:#7cc4ff;margin-bottom:5px}.consent-summary{color:#c4d2df;line-height:1.45;margin-bottom:7px}.consent-scroll{flex:1;min-height:0;overflow:auto;padding-right:3px}.consent-actions{flex:0 0 auto;padding-top:7px;border-top:1px solid #26384b}.legal-note{color:#d8a45b;font-size:10px;line-height:1.4;margin:6px 0}
     ::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-track{background:#0b1118}::-webkit-scrollbar-thumb{background:#2a394b;border-radius:999px;border:2px solid #0b1118}::-webkit-scrollbar-thumb:hover{background:#3a4c62}
   </style>
 </head>
 <body class="chrome-hidden">
-  <div class="header"><h1>&#23398;&#20064;&#21161;&#25163;</h1></div>
+  <div class="header"><h1>&#23398;&#20064;&#21161;&#25163;</h1><div class="header-actions"><span class="header-account" id="headerAccountLabel">游客模式</span><button class="pin-btn" id="pinWindowBtn" type="button" title="固定为独立窗口" aria-label="固定为独立窗口">&#128204;</button></div></div>
   <div class="layout">
     <nav class="side left-side">
       <button class="side-btn active" data-panel="videoPanel">&#35270;&#39057;</button>
@@ -96,6 +96,45 @@
         <details class="fold" open><summary>&#38544;&#34255;&#26102;&#38388;&#19982;&#25928;&#26524;</summary><div class="fold-body"><div class="section"><div class="section-title">&#31163;&#24320;&#21518;&#38544;&#34255;&#24310;&#36831;&#65288;&#31186;&#65289;</div><input id="navHideDelayInput" type="number" min="0.2" max="3" step="0.1" value="0.9"></div><div class="section"><div class="section-title">&#28369;&#21160;&#28129;&#20837;&#28129;&#20986;&#26102;&#38388;&#65288;&#31186;&#65289;</div><input id="navTransitionInput" type="number" min="0.05" max="1" step="0.05" value="0.18"></div></div></details>
         <details class="fold" open><summary>OCR &#26694;&#36873;&#26679;&#24335;</summary><div class="fold-body"><div class="section"><div class="section-title">&#26694;&#36873;&#26694;&#39068;&#33394;&#28145;&#27973;</div><div class="tone-control"><span class="tone-swatch black"></span><input id="captureToneInput" type="range" min="0" max="255" step="1" value="96"><span class="tone-swatch white"></span></div></div><div class="section"><div class="section-title">&#26694;&#36873;&#26694;&#31895;&#32454;</div><div class="width-control"><span>0.1px</span><input id="captureWidthInput" type="range" min="0.1" max="5" step="0.1" value="2"><span>5px</span></div></div><div class="tone-preview" id="captureTonePreview">&#40657;&#33394; - &#28784;&#33394; - &#30333;&#33394;</div></div></details>
       </section>
+      <section class="panel" id="accountPanel">
+        <div id="accountGuestView">
+          <details class="fold" open><summary>用户登录</summary><div class="fold-body">
+            <div class="section"><div class="section-title">用户名</div><input id="loginUsernameInput" type="text" maxlength="32" autocomplete="username" placeholder="输入本地用户名"></div>
+            <div class="section"><div class="section-title">密码</div><input id="loginPasswordInput" type="password" maxlength="128" autocomplete="current-password" placeholder="输入密码"></div>
+            <button class="btn primary" id="loginUserBtn">登录</button>
+          </div></details>
+          <details class="fold"><summary>注册本地账户</summary><div class="fold-body">
+            <div class="hint" style="margin-bottom:7px;">账户只保存在当前浏览器，不支持跨设备同步或在线找回密码。</div>
+            <div class="section"><div class="section-title">用户名</div><input id="registerUsernameInput" type="text" maxlength="32" autocomplete="username" placeholder="3-32 位中文、字母或数字"></div>
+            <div class="section"><div class="section-title">显示名称（可选）</div><input id="registerDisplayNameInput" type="text" maxlength="40" placeholder="用于界面显示"></div>
+            <div class="section"><div class="section-title">密码</div><input id="registerPasswordInput" type="password" maxlength="128" autocomplete="new-password" placeholder="至少 8 位，包含字母和数字"></div>
+            <div class="section"><div class="section-title">确认密码</div><input id="registerPasswordConfirmInput" type="password" maxlength="128" autocomplete="new-password" placeholder="再次输入密码"></div>
+            <button class="btn good" id="registerUserBtn">注册并登录</button>
+          </div></details>
+        </div>
+        <div class="hidden" id="accountUserView">
+          <div class="account-summary">
+            <div class="account-card"><div class="account-card-label">当前用户</div><div class="account-card-value" id="accountNameValue">-</div></div>
+            <div class="account-card"><div class="account-card-label">账户方案</div><div class="account-card-value" id="accountPlanValue">-</div></div>
+            <div class="account-card"><div class="account-card-label">OCR 额度预留</div><div class="account-card-value" id="accountOcrQuotaValue">-</div></div>
+            <div class="account-card"><div class="account-card-label">AI 额度预留</div><div class="account-card-value" id="accountAiQuotaValue">-</div></div>
+          </div>
+          <details class="fold" open><summary>个人资料</summary><div class="fold-body"><div class="section"><div class="section-title">显示名称</div><input id="profileDisplayNameInput" type="text" maxlength="40"></div><div class="row"><button class="btn primary" id="updateProfileBtn">保存资料</button><button class="btn" id="logoutUserBtn">退出登录</button></div></div></details>
+          <details class="fold"><summary>修改密码</summary><div class="fold-body"><div class="section"><div class="section-title">当前密码</div><input id="currentPasswordInput" type="password" maxlength="128" autocomplete="current-password"></div><div class="section"><div class="section-title">新密码</div><input id="newPasswordInput" type="password" maxlength="128" autocomplete="new-password"></div><div class="section"><div class="section-title">确认新密码</div><input id="newPasswordConfirmInput" type="password" maxlength="128" autocomplete="new-password"></div><button class="btn primary" id="changePasswordBtn">修改密码</button></div></details>
+          <details class="fold"><summary>删除账户</summary><div class="fold-body"><div class="hint" style="margin-bottom:7px;">删除后无法恢复；其他截图、OCR、AI 历史和设置不会随账户自动删除。</div><div class="section"><div class="section-title">当前密码</div><input id="deletePasswordInput" type="password" maxlength="128"></div><div class="section"><div class="section-title">输入 DELETE 确认</div><input id="deleteConfirmInput" type="text" maxlength="6" placeholder="DELETE"></div><button class="btn danger" id="deleteUserBtn">永久删除本地账户</button></div></details>
+        </div>
+        <div class="message" id="accountStatus">正在读取账户状态...</div>
+      </section>
+      <section class="panel" id="declarationPanel">
+        <details class="fold" open><summary id="declarationTitle">使用声明</summary><div class="fold-body">
+          <div class="message" id="declarationSummary">正在读取声明...</div>
+          <div class="declaration-content" id="declarationSections" style="margin-top:7px;"></div>
+          <div class="legal-note">提示：本声明用于清晰告知和约束使用行为，不能替代针对具体经营地区和业务模式的专业法律审核。</div>
+          <label class="declaration-check"><input id="declarationPanelCheckbox" type="checkbox"><span>我已阅读并同意当前版本声明，承诺仅在合法、获授权的范围内使用。</span></label>
+          <button class="btn primary" id="acceptDeclarationPanelBtn">确认当前声明</button>
+          <div class="message" id="declarationAcceptanceStatus" style="margin-top:7px;">尚未确认。</div>
+        </div></details>
+      </section>
       <section class="panel" id="scriptPanel">
         <details class="fold" open><summary class="script-summary"><span>&#33050;&#26412;</span><button class="icon-btn script-add" id="addScriptRowBtn" title="Add script">+</button></summary><div class="script-line"></div><div class="fold-body"><div class="script-manager"><div class="message" id="userScriptsApiStatus" style="margin-bottom:8px;min-height:0;">&#27491;&#22312;&#26816;&#26597;&#29992;&#25143;&#33050;&#26412;&#26435;&#38480;...</div><div class="script-toolbar"><button class="btn" id="runAllScriptsBtn">&#36816;&#34892;&#20840;&#37096;</button><button class="btn danger" id="clearScriptsBtn">&#28165;&#31354;&#33050;&#26412;</button></div><div class="script-feature-host" id="scriptScriptFeatures"></div><div id="scriptList"></div><div class="message" id="scriptStatus">&#28857;&#20987;&#36755;&#20837;&#26694;&#36873;&#25321;&#26412;&#22320; .js &#33050;&#26412;&#25991;&#20214;&#65292;&#28982;&#21518;&#28857;&#20987;&#25773;&#25918;&#25191;&#34892;&#12290;</div></div><div class="script-runner"><div class="script-runner-head"><button class="btn" id="backToScriptsBtn">&#36820;&#22238;</button><div class="script-runner-title" id="scriptRunnerTitle">&#33050;&#26412;&#30028;&#38754;</div><button class="btn" id="reloadScriptUiBtn">&#37325;&#36733;</button></div><iframe class="script-frame" id="scriptFrame" src="script_workspace.html"></iframe></div></div></details>
       </section>
@@ -104,9 +143,26 @@
       </section>
     </main>
     <nav class="side right-side">
+      <button class="side-btn" data-panel="accountPanel">账户</button>
+      <div class="side-sep"></div>
       <button class="side-btn" data-panel="settingsPanel">&#35774;&#32622;</button>
       <button class="side-btn" data-panel="logPanel">&#26085;&#24535;</button>
+      <div class="side-sep"></div>
+      <button class="side-btn" data-panel="declarationPanel">声明</button>
     </nav>
+  </div>
+  <div class="consent-gate" id="declarationGate" role="dialog" aria-modal="true" aria-labelledby="declarationGateTitle">
+    <div class="consent-card">
+      <div class="consent-title" id="declarationGateTitle">使用前请阅读声明</div>
+      <div class="consent-summary" id="declarationGateSummary">正在读取声明...</div>
+      <div class="consent-scroll"><div class="declaration-content" id="declarationGateSections"></div><div class="legal-note">本地确认记录可被清除或修改，不属于不可篡改的法律存证；正式商业发布前仍应由律师审核条款和隐私政策。</div></div>
+      <div class="consent-actions">
+        <label class="declaration-check"><input id="declarationGateCheckbox" type="checkbox"><span>我已阅读并同意，仅将插件用于合法、获授权的学习和效率场景。</span></label>
+        <div class="row"><button class="btn primary" id="acceptDeclarationGateBtn">同意并继续</button><button class="btn" id="declineDeclarationBtn">不同意并关闭</button></div>
+        <div class="message" id="declarationGateStatus">需要明确同意后才能继续使用。</div>
+        <button class="btn warn hidden" id="reloadExtensionBtn" style="margin-top:6px;">重新加载扩展</button>
+      </div>
+    </div>
   </div>
   <script src="vendor/tesseract/tesseract.min.js"></script>
   <script src="ocr.js"></script>

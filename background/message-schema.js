@@ -110,6 +110,34 @@
     return "";
   }
 
+  function validUsername(value) {
+    return typeof value === "string" && /^[A-Za-z0-9\u4e00-\u9fff_.-]{3,32}$/.test(value.trim());
+  }
+
+  function validPassword(value) {
+    return typeof value === "string" && value.length >= 8 && value.length <= 128 && /[A-Za-z]/.test(value) && /[0-9]/.test(value) && !/[\u0000-\u001f\u007f]/.test(value);
+  }
+
+  function validDisplayName(value) {
+    return typeof value === "string" && value.trim().length >= 1 && value.trim().length <= 40 && !/[\u0000-\u001f\u007f]/.test(value);
+  }
+
+  function validateRegister(payload) {
+    var error = checkKeys(payload, ["username", "password", "displayName"], ["username", "password"]);
+    if (error) return error;
+    if (!validUsername(payload.username)) return "Username is invalid.";
+    if (!validPassword(payload.password)) return "Password must be 8-128 characters and contain letters and numbers.";
+    if (payload.displayName != null && String(payload.displayName).trim() && !validDisplayName(payload.displayName)) return "Display name is invalid.";
+    return "";
+  }
+
+  function validateLogin(payload) {
+    var error = checkKeys(payload, ["username", "password"], ["username", "password"]);
+    if (error) return error;
+    if (!validUsername(payload.username)) return "Username is invalid.";
+    return typeof payload.password === "string" && payload.password.length <= 128 ? "" : "Password is invalid.";
+  }
+
   var rules = {
     controlActiveTab: { sources: ["popup"], validate: validateControl },
     captureVisiblePage: { sources: ["content"], validate: function (payload) { return validateCaptureTokenPayload(payload); } },
@@ -125,6 +153,34 @@
       return typeof payload.dataUrl === "string" && /^data:image\/png;base64,/i.test(payload.dataUrl) && payload.dataUrl.length <= MAX_IMAGE_LENGTH ? "" : "Capture image is invalid or too large.";
     } },
     getManualCapture: { sources: ["popup"], validate: noPayload },
+    getUsageDeclaration: { sources: ["popup"], validate: noPayload },
+    acceptUsageDeclaration: { sources: ["popup"], validate: function (payload) {
+      var error = checkKeys(payload, ["version", "accepted"], ["version", "accepted"]);
+      if (error) return error;
+      if (typeof payload.version !== "string" || !/^[A-Za-z0-9._-]{1,64}$/.test(payload.version)) return "Declaration version is invalid.";
+      return payload.accepted === true ? "" : "Declaration must be explicitly accepted.";
+    } },
+    getUserSession: { sources: ["popup"], validate: noPayload },
+    openPinnedWindow: { sources: ["popup"], validate: noPayload },
+    registerUser: { sources: ["popup"], validate: validateRegister },
+    loginUser: { sources: ["popup"], validate: validateLogin },
+    logoutUser: { sources: ["popup"], validate: noPayload },
+    updateUserProfile: { sources: ["popup"], validate: function (payload) {
+      var error = checkKeys(payload, ["displayName"], ["displayName"]);
+      return error || (validDisplayName(payload.displayName) ? "" : "Display name is invalid.");
+    } },
+    changeUserPassword: { sources: ["popup"], validate: function (payload) {
+      var error = checkKeys(payload, ["currentPassword", "newPassword"], ["currentPassword", "newPassword"]);
+      if (error) return error;
+      if (typeof payload.currentPassword !== "string" || payload.currentPassword.length > 128) return "Current password is invalid.";
+      return validPassword(payload.newPassword) ? "" : "New password must be 8-128 characters and contain letters and numbers.";
+    } },
+    deleteUserAccount: { sources: ["popup"], validate: function (payload) {
+      var error = checkKeys(payload, ["password", "confirm"], ["password", "confirm"]);
+      if (error) return error;
+      if (typeof payload.password !== "string" || payload.password.length > 128) return "Password is invalid.";
+      return payload.confirm === "DELETE" ? "" : "Account deletion confirmation is invalid.";
+    } },
     saveAiSettings: { sources: ["popup"], validate: validateAiSettings },
     saveApiKey: { sources: ["popup"], validate: validateAiSettings },
     getSettings: { sources: ["popup"], validate: noPayload },
@@ -168,7 +224,10 @@
 
   function senderMatches(source, sender) {
     if (!sender || sender.id !== chrome.runtime.id) return false;
-    if (source === "popup") return sender.url === chrome.runtime.getURL("popup.html");
+    if (source === "popup") {
+      var popupUrl = chrome.runtime.getURL("popup.html");
+      return sender.url === popupUrl || String(sender.url || "").indexOf(popupUrl + "?") === 0;
+    }
     if (source === "offscreen-ocr") return sender.url === chrome.runtime.getURL("ocr_worker.html");
     if (source === "content" || source === "auto-script-trigger") {
       return !!sender.tab && /^https?:\/\//i.test(String(sender.url || ""));
