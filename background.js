@@ -1,11 +1,22 @@
 importScripts("background/storage-service.js");
 importScripts("background/declaration-service.js");
 importScripts("background/user-service.js");
+importScripts("background/user-provider.js");
+importScripts("background/subscription-service.js");
+importScripts("background/feature-gate.js");
+importScripts("sdk/contracts.js");
+importScripts("sdk/method-schema.js");
+importScripts("background/permission-service.js");
+importScripts("background/sdk-storage-service.js");
+importScripts("background/sdk-context-service.js");
+importScripts("background/developer-mode-service.js");
+importScripts("background/privacy-service.js");
 importScripts("background/window-service.js");
 importScripts("background/ai-providers.js");
 importScripts("background/ai-service.js");
 importScripts("background/ocr-service.js");
 importScripts("background/video-service.js");
+importScripts("background/sdk-service.js");
 importScripts("background/message-schema.js");
 importScripts("background/message-router.js");
 importScripts("background/user-script-service.js");
@@ -20,6 +31,9 @@ importScripts("background/user-script-service.js");
   var MAX_USER_SCRIPT_LENGTH = 200000;
   var MIN_ALARM_INTERVAL_SECONDS = 30;
   var AUTO_SCRIPT_TRIGGER_ID = "winspeedball-auto-script-trigger";
+  var SDK_SESSIONS_KEY = "sdkRuntimeSessions";
+  var SDK_CONTEXT_INTENTS_KEY = "sdkContextIntents";
+  var CAPTURE_AUTH_KEY = "pendingCaptureAuthorization";
   var pendingCapture = null;
   var lastAccessibleTab = null;
   var DOUYIN_ALARM = "douyin-panel-auto-next";
@@ -34,6 +48,12 @@ importScripts("background/user-script-service.js");
   var saveCaptureRecord = self.WinSpeedBallStorageService.saveCaptureRecord;
   var declarationService = self.WinSpeedBallDeclarationService;
   var userService = self.WinSpeedBallUserService;
+  var subscriptionService = self.WinSpeedBallSubscriptionService;
+  var featureGate = self.WinSpeedBallFeatureGate;
+  var permissionService = self.WinSpeedBallPermissionService;
+  var sdkStorageService = self.WinSpeedBallSdkStorageService;
+  var developerModeService = self.WinSpeedBallDeveloperModeService;
+  var privacyService = self.WinSpeedBallPrivacyService;
   var windowService = self.WinSpeedBallWindowService;
   var callAi = self.WinSpeedBallAiService.call;
   var saveAiSettings = self.WinSpeedBallAiService.saveSettings;
@@ -42,10 +62,33 @@ importScripts("background/user-script-service.js");
   var handleOcrProgress = ocrService.handleProgress;
   var handleOcrComplete = ocrService.handleComplete;
   var handleOcrFailed = ocrService.handleFailed;
+  var cancelOcrJob = ocrService.cancel;
   var getManualCapture = ocrService.getManualCapture;
   var resumePendingOcrJob = ocrService.resume;
   var isOcrWorkerSender = ocrService.isWorkerSender;
   var videoService = self.WinSpeedBallVideoService.create();
+  var sdkContextService = self.WinSpeedBallSdkContextService.create({
+    contracts: self.WinSpeedBallSdkContracts,
+    resolveCurrent: resolveSdkContext,
+    validateContext: validateSdkContext,
+    readIntents: readSdkContextIntents,
+    writeIntents: writeSdkContextIntents
+  });
+  var sdkService = self.WinSpeedBallSdkService.create({
+    contracts: self.WinSpeedBallSdkContracts,
+    methodSchema: self.WinSpeedBallSdkMethodSchema,
+    permissionService: permissionService,
+    featureGate: featureGate,
+    developerModeService: developerModeService,
+    sdkStorageService: sdkStorageService,
+    consumeContext: function (nonce, capabilities) { return sdkContextService.consume(nonce, capabilities); },
+    validateContext: validateSdkContext,
+    controlTab: function (tabId, command, callback) { videoService.controlTab(tabId, command, callback); },
+    callAi: callAi,
+    getLatestOcr: getManualCapture,
+    readSessions: readSdkSessions,
+    writeSessions: writeSdkSessions
+  });
   var normalIcon = {
     16: "icons/icon-blue-16.png",
     32: "icons/icon-blue-32.png",
@@ -72,21 +115,64 @@ importScripts("background/user-script-service.js");
     } catch (e) {}
   }
 
+  function writeCaptureAuthorization(value) {
+    pendingCapture = value || null;
+    return new Promise(function (resolve) {
+      var area = chrome.storage && chrome.storage.session;
+      if (!area) { resolve({ ok: false, error: "Session storage is unavailable." }); return; }
+      var callback = function () {
+        var error = lastErrorMessage();
+        resolve(error ? { ok: false, error: error } : { ok: true });
+      };
+      try {
+        if (value) {
+          var data = {};
+          data[CAPTURE_AUTH_KEY] = value;
+          area.set(data, callback);
+        } else area.remove([CAPTURE_AUTH_KEY], callback);
+      } catch (error) { resolve({ ok: false, error: error.message || String(error) }); }
+    });
+  }
+
+  function readCaptureAuthorization() {
+    return new Promise(function (resolve) {
+      var area = chrome.storage && chrome.storage.session;
+      if (!area) { resolve(null); return; }
+      try {
+        area.get([CAPTURE_AUTH_KEY], function (data) {
+          var error = lastErrorMessage();
+          var record = !error && data && data[CAPTURE_AUTH_KEY];
+          if (!record || typeof record !== "object" || typeof record.token !== "string" || !Number.isInteger(record.tabId) || !Number.isFinite(record.expiresAt)) record = null;
+          pendingCapture = record;
+          resolve(record);
+        });
+      } catch (error) { resolve(null); }
+    });
+  }
+
+  function clearCaptureAuthorization() {
+    return writeCaptureAuthorization(null);
+  }
+
   function createCaptureAuthorization(tabId) {
     var token = "";
     try { token = crypto.randomUUID(); } catch (e) { token = Date.now() + "-" + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2); }
-    pendingCapture = { token: token, tabId: tabId, expiresAt: Date.now() + 120000, stage: "selecting" };
-    return token;
+    var record = { token: token, tabId: tabId, expiresAt: Date.now() + 120000, stage: "selecting" };
+    return writeCaptureAuthorization(record).then(function (saved) {
+      if (!saved.ok) throw new Error(saved.error || "Could not save capture authorization.");
+      return token;
+    });
   }
 
   function validateCaptureAuthorization(req, sender) {
-    if (!pendingCapture || pendingCapture.expiresAt < Date.now()) {
-      pendingCapture = null;
-      return "Capture authorization expired.";
-    }
-    if (!req || req.captureToken !== pendingCapture.token) return "Capture authorization is invalid.";
-    if (!sender || !sender.tab || sender.tab.id !== pendingCapture.tabId) return "Capture tab does not match the authorized tab.";
-    return "";
+    return readCaptureAuthorization().then(function (record) {
+      if (!record || record.expiresAt < Date.now()) {
+        return clearCaptureAuthorization().then(function () { return { ok: false, error: "Capture authorization expired." }; });
+      }
+      if (!req || req.captureToken !== record.token) return { ok: false, error: "Capture authorization is invalid." };
+      if (!sender || !sender.tab || sender.tab.id !== record.tabId) return { ok: false, error: "Capture tab does not match the authorized tab." };
+      return { ok: true, record: record };
+    });
   }
 
   function getCapturePreferences(callback) {
@@ -123,7 +209,7 @@ importScripts("background/user-script-service.js");
   }
 
   function getActiveSiteAccess(callback) {
-    queryActiveTab(function (tab, err) {
+    queryScriptTargetTab(function (tab, err) {
       if (err || !tab || tab.id == null) {
         callback({ ok: false, error: err || "No active tab found." });
         return;
@@ -230,6 +316,132 @@ importScripts("background/user-script-service.js");
     });
   }
 
+  function readSdkSessions() {
+    return new Promise(function (resolve) {
+      try {
+        chrome.storage.session.get([SDK_SESSIONS_KEY], function (data) {
+          var error = lastErrorMessage();
+          var stored = !error && data && data[SDK_SESSIONS_KEY];
+          resolve(stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {});
+        });
+      } catch (error) { resolve({}); }
+    });
+  }
+
+  function writeSdkSessions(sessions) {
+    return new Promise(function (resolve) {
+      var data = {};
+      data[SDK_SESSIONS_KEY] = sessions || {};
+      try {
+        chrome.storage.session.set(data, function () {
+          var error = lastErrorMessage();
+          resolve(error ? { ok: false, code: "SDK_SESSION_STORAGE_FAILED", error: error } : { ok: true });
+        });
+      } catch (error) { resolve({ ok: false, code: "SDK_SESSION_STORAGE_FAILED", error: error.message || String(error) }); }
+    });
+  }
+
+  function readSdkContextIntents() {
+    return new Promise(function (resolve) {
+      try {
+        chrome.storage.session.get([SDK_CONTEXT_INTENTS_KEY], function (data) {
+          var error = lastErrorMessage();
+          var stored = !error && data && data[SDK_CONTEXT_INTENTS_KEY];
+          resolve(stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {});
+        });
+      } catch (error) { resolve({}); }
+    });
+  }
+
+  function writeSdkContextIntents(intents) {
+    return new Promise(function (resolve) {
+      var data = {};
+      data[SDK_CONTEXT_INTENTS_KEY] = intents || {};
+      try {
+        chrome.storage.session.set(data, function () {
+          var error = lastErrorMessage();
+          resolve(error ? { ok: false, code: "SDK_CONTEXT_STORAGE_FAILED", error: error } : { ok: true });
+        });
+      } catch (error) { resolve({ ok: false, code: "SDK_CONTEXT_STORAGE_FAILED", error: error.message || String(error) }); }
+    });
+  }
+
+  function sdkOrigin(url) {
+    try {
+      var parsed = new URL(String(url || ""));
+      return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.origin : "";
+    } catch (error) { return ""; }
+  }
+
+  function resolveSdkContext(capabilities) {
+    capabilities = Array.isArray(capabilities) ? capabilities : [];
+    var requiresTab = capabilities.some(function (capability) {
+      return capability === "video.read" || capability === "video.control" || capability === "page.read" || capability === "ocr.read";
+    });
+    return new Promise(function (resolve) {
+      queryScriptTargetTab(function (tab, error) {
+        var origin = tab && sdkOrigin(tab.url);
+        var originPattern = origin && originPatternFromUrl(tab.url || "");
+        if (!error && tab && tab.id != null && origin && originPattern) {
+          resolve({ ok: true, tabId: tab.id, url: tab.url || origin, origin: origin, originPattern: originPattern });
+          return;
+        }
+        if (requiresTab) {
+          resolve({ ok: false, code: "SDK_TAB_REQUIRED", error: error || "Open an authorized web page before starting this SDK session." });
+          return;
+        }
+        resolve({ ok: true, tabId: null, url: "https://developer-mode.local/", origin: "https://developer-mode.local", originPattern: "https://developer-mode.local/*" });
+      });
+    });
+  }
+
+  function validateSdkContext(session) {
+    if (!session || !Number.isInteger(session.tabId)) {
+      return Promise.resolve(session && session.origin === "https://developer-mode.local"
+        ? { ok: true }
+        : { ok: false, code: "SDK_CONTEXT_CLOSED", error: "SDK page context is unavailable." });
+    }
+    return new Promise(function (resolve) {
+      try {
+        chrome.tabs.get(session.tabId, function (tab) {
+          var error = lastErrorMessage();
+          var origin = tab && sdkOrigin(tab.url);
+          if (error || !tab || origin !== session.origin) {
+            resolve({ ok: false, code: "SDK_CONTEXT_CLOSED", error: error || "The authorized page navigated to another origin or closed." });
+            return;
+          }
+          var pattern = originPatternFromUrl(tab.url || "");
+          hasOriginPermission(pattern).then(function (granted) {
+            resolve(granted ? { ok: true } : { ok: false, code: "SDK_ORIGIN_NOT_ALLOWED", error: "Site permission was removed." });
+          });
+        });
+      } catch (error) { resolve({ ok: false, code: "SDK_CONTEXT_CLOSED", error: error.message || String(error) }); }
+    });
+  }
+
+  function gateAction(featureId, run, respond) {
+    return Promise.resolve().then(function () {
+      return featureGate.check(featureId);
+    }).catch(function (error) {
+      return {
+        ok: false,
+        allowed: false,
+        error: String(error && error.message || error || "Feature availability could not be checked.").slice(0, 300)
+      };
+    }).then(function (gate) {
+      if (!gate || gate.allowed !== true) {
+        respond({
+          ok: false,
+          code: "FEATURE_NOT_AVAILABLE",
+          feature: featureId,
+          error: gate && (gate.reason || gate.error) || "Feature is unavailable."
+        });
+        return;
+      }
+      return run();
+    });
+  }
+
   function controlActiveTab(command, callback) {
     queryActiveTab(function (tab, error) {
       if (error) {
@@ -256,12 +468,13 @@ importScripts("background/user-script-service.js");
   }
 
   function captureVisiblePage(req, sender, callback) {
-    var authError = validateCaptureAuthorization(req, sender);
-    if (authError) {
-      callback({ ok: false, error: authError });
-      return;
-    }
-    try {
+    validateCaptureAuthorization(req, sender).then(function (authorization) {
+      if (!authorization.ok) {
+        callback({ ok: false, error: authorization.error });
+        return;
+      }
+      var captureAuthorization = authorization.record;
+      try {
       chrome.windows.getCurrent(function (win) {
         var winErr = lastErrorMessage();
         if (winErr) {
@@ -275,7 +488,7 @@ importScripts("background/user-script-service.js");
             return;
           }
           var activeTab = tabs && tabs[0];
-          if (!activeTab || activeTab.id !== pendingCapture.tabId) {
+          if (!activeTab || activeTab.id !== captureAuthorization.tabId) {
             callback({ ok: false, error: "The authorized tab is no longer active." });
             return;
           }
@@ -291,16 +504,19 @@ importScripts("background/user-script-service.js");
             var err = lastErrorMessage();
             if (err) callback({ ok: false, error: err });
             else {
-              pendingCapture.stage = "captured";
-              pendingCapture.expiresAt = Date.now() + 30000;
-              callback({ ok: true, dataUrl: dataUrl });
+              captureAuthorization.stage = "captured";
+              captureAuthorization.expiresAt = Date.now() + 30000;
+              writeCaptureAuthorization(captureAuthorization).then(function (saved) {
+                callback(saved.ok ? { ok: true, dataUrl: dataUrl } : { ok: false, error: saved.error });
+              });
             }
           });
         });
       });
-    } catch (e) {
-      callback({ ok: false, error: e.message || String(e) });
-    }
+      } catch (e) {
+        callback({ ok: false, error: e.message || String(e) });
+      }
+    }).catch(function (error) { callback({ ok: false, error: error && error.message || String(error) }); });
   }
 
   function startRegionCapture(callback) {
@@ -321,14 +537,13 @@ importScripts("background/user-script-service.js");
         }
       } catch (e) {}
 
-      var captureToken = createCaptureAuthorization(tab.id);
-
-      function invokeStartCapture(allowInject) {
+      createCaptureAuthorization(tab.id).then(function (captureToken) {
+        function invokeStartCapture(allowInject) {
         chrome.scripting.executeScript({
           target: { tabId: tab.id, allFrames: false },
           world: "ISOLATED",
           func: function (token) {
-            if (window.__WinSpeedBallLoadedVersion === "2026-07-11-player-adapters-v1" && window.winSpeedBall && window.winSpeedBall.startRegionCapture) {
+            if (window.winSpeedBall && typeof window.winSpeedBall.startRegionCapture === "function") {
               return window.winSpeedBall.startRegionCapture(token);
             }
             return { ok: false, error: "content script not loaded" };
@@ -343,7 +558,7 @@ importScripts("background/user-script-service.js");
           }
           if (!allowInject) {
             setCaptureIndicator(false);
-            pendingCapture = null;
+            clearCaptureAuthorization();
             callback(result || { ok: false, error: execErr || "No response from page." });
             return;
           }
@@ -360,7 +575,7 @@ importScripts("background/user-script-service.js");
               var injectErr = lastErrorMessage();
               if (injectErr) {
                 setCaptureIndicator(false);
-                pendingCapture = null;
+                clearCaptureAuthorization();
                 callback({ ok: false, error: injectErr });
                 return;
               }
@@ -368,57 +583,65 @@ importScripts("background/user-script-service.js");
             });
           });
         });
-      }
+        }
 
-      invokeStartCapture(true);
+        invokeStartCapture(true);
+      }).catch(function (error) {
+        setCaptureIndicator(false);
+        callback({ ok: false, error: error && error.message || String(error) });
+      });
     });
   }
 
   function saveManualCapture(req, sender, callback) {
-    var authError = validateCaptureAuthorization(req, sender);
-    if (authError) {
-      callback({ ok: false, error: authError });
-      return;
-    }
-    if (!req.dataUrl || !/^data:image\/png;base64,/i.test(req.dataUrl)) {
-      callback({ ok: false, error: "Invalid capture image." });
-      return;
-    }
-    var sourceTime = Date.now();
-    saveCaptureRecord(req.dataUrl, sourceTime).then(function () {
-      storageSet({
-        manualCaptureTime: sourceTime,
-        manualOcrText: "",
-        manualOcrSourceTime: 0,
-        manualAiSourceTime: 0,
-        manualAiPrompt: "",
-        manualAiResponse: "",
-        ocrJobSourceTime: sourceTime,
-        ocrJobStatus: "queued",
-        ocrJobProgress: 0,
-        ocrJobError: "",
-        ocrJobUpdatedAt: Date.now(),
-        aiJobSourceTime: sourceTime,
-        aiJobStatus: "waiting",
-        aiJobError: "",
-        aiJobUpdatedAt: Date.now()
-      }, function (res) {
-        if (!res || !res.ok) {
-          callback(res || { ok: false, error: "Could not save capture metadata." });
-          return;
-        }
-        storageRemove(["manualCaptureDataUrl"], function () {});
-        if (pendingCapture && pendingCapture.token === req.captureToken) {
-          pendingCapture.stage = "saved";
-          pendingCapture.expiresAt = Date.now() + 5000;
-        }
-        callback({ ok: true, time: sourceTime });
-        startOcrJob(req.dataUrl, sourceTime);
+    validateCaptureAuthorization(req, sender).then(function (authorization) {
+      if (!authorization.ok) {
+        callback({ ok: false, error: authorization.error });
+        return;
+      }
+      if (!req.dataUrl || !/^data:image\/png;base64,/i.test(req.dataUrl)) {
+        callback({ ok: false, error: "Invalid capture image." });
+        return;
+      }
+      var sourceTime = Date.now();
+      saveCaptureRecord(req.dataUrl, sourceTime).then(function () {
+        storageSet({
+          manualCaptureTime: sourceTime,
+          manualOcrText: "",
+          manualOcrSourceTime: 0,
+          manualAiSourceTime: 0,
+          manualAiPrompt: "",
+          manualAiResponse: "",
+          ocrJobSourceTime: sourceTime,
+          ocrJobStatus: "queued",
+          ocrJobProgress: 0,
+          ocrJobError: "",
+          ocrJobUpdatedAt: Date.now(),
+          aiJobSourceTime: sourceTime,
+          aiJobStatus: "waiting",
+          aiJobError: "",
+          aiJobUpdatedAt: Date.now()
+        }, function (res) {
+          if (!res || !res.ok) {
+            callback(res || { ok: false, error: "Could not save capture metadata." });
+            return;
+          }
+          storageRemove(["manualCaptureDataUrl"], function () {});
+          var record = authorization.record;
+          record.stage = "saved";
+          record.expiresAt = Date.now() + 5000;
+          writeCaptureAuthorization(record).then(function () {
+            callback({ ok: true, time: sourceTime });
+            startOcrJob(req.dataUrl, sourceTime);
+          });
+        });
+      }).catch(function (error) {
+        var message = error && error.message ? error.message : String(error || "Could not save capture.");
+        appendBackgroundLog("截图", "保存到 IndexedDB 失败", { 原因: message });
+        callback({ ok: false, error: message });
       });
     }).catch(function (error) {
-      var message = error && error.message ? error.message : String(error || "Could not save capture.");
-      appendBackgroundLog("截图", "保存到 IndexedDB 失败", { 原因: message });
-      callback({ ok: false, error: message });
+      callback({ ok: false, error: error && error.message || String(error) });
     });
   }
 
@@ -802,6 +1025,64 @@ importScripts("background/user-script-service.js");
     });
   } catch (e) {}
 
+  function notifySdkSessionsRevoked(reason) {
+    try {
+      chrome.runtime.sendMessage({
+        channel: "WSB_INTERNAL",
+        version: 1,
+        type: "SDK_SESSIONS_REVOKED",
+        reason: String(reason || "revoked")
+      }, function () { lastErrorMessage(); });
+    } catch (error) {}
+  }
+
+  function closeAllSdkSessions(reason) {
+    return sdkService.closeAllSessions().then(function (result) {
+      return sdkContextService.clear().then(function (cleared) {
+        if (!result || !result.ok) return result;
+        return cleared && cleared.ok === false ? cleared : result;
+      });
+    }).then(function (result) {
+      if (result && result.ok) notifySdkSessionsRevoked(reason);
+      return result;
+    });
+  }
+
+  function updateDeveloperMode(request) {
+    if (request.enabled) {
+      return closeAllSdkSessions("developer-mode-reset").then(function (closed) {
+        if (!closed || !closed.ok) return closed || { ok: false, code: "SDK_SESSION_CLOSE_FAILED", error: "Existing SDK sessions could not be closed." };
+        return developerModeService.setEnabled(true, request.confirmed);
+      });
+    }
+    return developerModeService.setEnabled(false, false).then(function (status) {
+      return closeAllSdkSessions("developer-mode-disabled").then(function (closed) {
+        if (!status || !status.ok) return status;
+        status.sessionCleanupOk = !!(closed && closed.ok);
+        if (!status.sessionCleanupOk) status.sessionCleanupError = closed && closed.error || "SDK sessions could not be fully cleared.";
+        return status;
+      });
+    });
+  }
+
+  function clearPrivacyData(request) {
+    var stopsScripts = request.category === "scripts" || request.category === "all";
+    var stopsOcr = request.category === "ocr" || request.category === "all";
+    var stopsCapture = request.category === "screenshots" || request.category === "all";
+    var tasks = [
+      stopsScripts ? closeAllSdkSessions("privacy-clear") : Promise.resolve({ ok: true }),
+      stopsOcr ? Promise.resolve(cancelOcrJob()).catch(function () { return { ok: false }; }) : Promise.resolve({ ok: true }),
+      stopsCapture ? clearCaptureAuthorization() : Promise.resolve({ ok: true })
+    ];
+    return Promise.all(tasks).then(function () {
+      return privacyService.clear(request.category);
+    }).then(function (result) {
+      if (stopsScripts) notifySdkSessionsRevoked("privacy-clear");
+      if (!stopsScripts) return result;
+      return syncRegisteredUserScripts().then(function () { return result; });
+    });
+  }
+
   self.WinSpeedBallMessageRouter.install({
     ocrJobProgress: function (request, sender) {
       if (!isOcrWorkerSender(sender)) return { ok: false, error: "Unauthorized OCR worker message." };
@@ -818,19 +1099,30 @@ importScripts("background/user-script-service.js");
       handleOcrFailed(request);
       return { ok: true };
     },
-    controlActiveTab: function (request, sender, respond) { controlActiveTab(request.command, respond); },
-    captureVisiblePage: function (request, sender, respond) { captureVisiblePage(request, sender, respond); },
-    startRegionCapture: function (request, sender, respond) { startRegionCapture(respond); },
+    controlActiveTab: function (request, sender, respond) {
+      return gateAction("video.basic", function () { controlActiveTab(request.command, respond); }, respond);
+    },
+    captureVisiblePage: function (request, sender, respond) {
+      return gateAction("ocr.basic", function () { captureVisiblePage(request, sender, respond); }, respond);
+    },
+    startRegionCapture: function (request, sender, respond) {
+      return gateAction("ocr.basic", function () { startRegionCapture(respond); }, respond);
+    },
     getCapturePreferences: function (request, sender, respond) { getCapturePreferences(respond); },
     setCaptureIndicator: function (request, sender) {
-      var error = validateCaptureAuthorization(request, sender);
-      if (error) return { ok: false, error: error };
-      setCaptureIndicator(!!request.active);
-      if (!request.active) pendingCapture = null;
-      return { ok: true };
+      return validateCaptureAuthorization(request, sender).then(function (authorization) {
+        if (!authorization.ok) return { ok: false, error: authorization.error };
+        setCaptureIndicator(!!request.active);
+        if (!request.active) return clearCaptureAuthorization().then(function () { return { ok: true }; });
+        return { ok: true };
+      });
     },
-    saveManualCapture: function (request, sender, respond) { saveManualCapture(request, sender, respond); },
-    getManualCapture: function (request, sender, respond) { getManualCapture(respond); },
+    saveManualCapture: function (request, sender, respond) {
+      return gateAction("ocr.basic", function () { saveManualCapture(request, sender, respond); }, respond);
+    },
+    getManualCapture: function (request, sender, respond) {
+      return gateAction("ocr.basic", function () { getManualCapture(respond); }, respond);
+    },
     getUsageDeclaration: function () { return declarationService.get(); },
     acceptUsageDeclaration: function (request) {
       return userService.getSession().then(function (session) {
@@ -842,6 +1134,19 @@ importScripts("background/user-script-service.js");
       });
     },
     getUserSession: function () { return userService.getSession(); },
+    getSubscription: function () { return subscriptionService.getPlan(); },
+    getFeatureGates: function () { return featureGate.list(); },
+    canUseFeature: function (request) { return featureGate.check(request.feature); },
+    getDeveloperMode: function () { return developerModeService.getStatus(); },
+    setDeveloperMode: function (request) { return updateDeveloperMode(request); },
+    prepareSdkContext: function (request) { return sdkContextService.prepare(request.capabilities); },
+    prepareSdkSession: function (request) { return sdkService.prepareSession(request); },
+    invokeSdkSession: function (request) { return sdkService.invoke(request.sessionToken, request.request); },
+    getSdkSessionStatus: function (request) { return sdkService.getSessionStatus(request.sessionToken); },
+    closeSdkSession: function (request) { return sdkService.closeSession(request.sessionToken); },
+    deleteSdkScriptData: function (request) { return sdkService.deleteScriptLifecycle(request.scriptId); },
+    getPrivacySummary: function () { return privacyService.getSummary(); },
+    clearPrivacyData: function (request) { return clearPrivacyData(request); },
     openPinnedWindow: function () { return windowService.openPinnedWindow(); },
     registerUser: function (request) { return userService.register(request); },
     loginUser: function (request) { return userService.login(request); },
@@ -858,10 +1163,18 @@ importScripts("background/user-script-service.js");
     douyinPanel: function (request, sender, respond) { handleDouyinPanel(request, respond); },
     bookPanel: function (request, sender, respond) { handleBookPanel(request, respond); },
     syncUserScripts: function () { return syncRegisteredUserScripts(); },
-    testAI: function (request, sender, respond) { callAi({ prompt: "Please reply: connection ok" }, respond); },
-    askAI: function (request, sender, respond, message) { callAi(message.payload, respond); },
-    testDeepSeek: function (request, sender, respond) { callAi({ prompt: "Please reply: connection ok" }, respond); },
-    askDeepSeek: function (request, sender, respond, message) { callAi(message.payload, respond); }
+    testAI: function (request, sender, respond) {
+      return gateAction("ai.basic", function () { callAi({ prompt: "Please reply: connection ok" }, respond); }, respond);
+    },
+    askAI: function (request, sender, respond, message) {
+      return gateAction("ai.basic", function () { callAi(message.payload, respond); }, respond);
+    },
+    testDeepSeek: function (request, sender, respond) {
+      return gateAction("ai.basic", function () { callAi({ prompt: "Please reply: connection ok" }, respond); }, respond);
+    },
+    askDeepSeek: function (request, sender, respond, message) {
+      return gateAction("ai.basic", function () { callAi(message.payload, respond); }, respond);
+    }
   });
 
   try {

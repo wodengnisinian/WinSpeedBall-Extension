@@ -18,6 +18,15 @@
   var topRevealTimer = null;
   var topHideTimer = null;
   var lastWorkspaceScript = null;
+  var pendingWorkspaceScript = null;
+  var scriptWorkspaceReady = false;
+  var scriptWorkspaceRunSequence = 0;
+  var scriptWorkspacePort = null;
+  var scriptWorkspaceRunId = "";
+  var scriptWorkspaceAutomationAllowed = false;
+  var SCRIPT_WORKSPACE_CHANNEL = "WSB_LEGACY_WORKSPACE";
+  var SCRIPT_WORKSPACE_PROTOCOL_VERSION = 1;
+  var douyinBridgeDecision = null;
   var douyinPanelState = { running: false, interval: MIN_AUTO_INTERVAL_SECONDS };
   var bookPanelState = { running: false, interval: MIN_AUTO_INTERVAL_SECONDS };
   var navRevealDelayMs = 800;
@@ -58,6 +67,28 @@
   var ensureSiteAccess = messageClient.ensureSiteAccess;
   var requestCurrentSiteAccess = messageClient.requestCurrentSiteAccess;
   var ensureServiceOrigin = messageClient.ensureServiceOrigin;
+  var developerDraftStore = self.WinSpeedBallDeveloperDraftStore.create({
+    storage: popupStorage,
+    contracts: self.WinSpeedBallSdkContracts
+  });
+  var sdkSessionController = self.WinSpeedBallSdkSessionController.create({
+    byId: $,
+    sendMessage: sendMessage,
+    draftStore: developerDraftStore,
+    contracts: self.WinSpeedBallSdkContracts,
+    protocol: self.WinSpeedBallSdkSessionProtocol,
+    ensureSiteAccess: ensureSiteAccess,
+    confirmAction: function (message) { return window.confirm(message); },
+    runtimeUrl: function (path) { return chrome.runtime.getURL(path); }
+  });
+  var developerController = self.WinSpeedBallDeveloperController.create({
+    byId: $,
+    sendMessage: sendMessage,
+    draftStore: developerDraftStore,
+    sessionController: sdkSessionController,
+    contracts: self.WinSpeedBallSdkContracts,
+    confirmAction: function (message) { return window.confirm(message); }
+  });
   var navZones = {
     left: { width: 32, top: 0, bottom: 320 },
     right: { width: 32, top: 0, bottom: 320 },
@@ -252,7 +283,12 @@
       var workspaceActive = state.scriptWorkspaceActive;
       if (workspaceActive == null) workspaceActive = !!(data && data.scriptWorkspaceActive);
       if (workspaceActive && lastWorkspaceScript && lastWorkspaceScript.code) {
-        showScriptWorkspaceUi(lastWorkspaceScript.name, lastWorkspaceScript.code);
+        showScriptWorkspaceUi(
+          lastWorkspaceScript.name,
+          lastWorkspaceScript.code,
+          lastWorkspaceScript.permissionConfirmed === true,
+          lastWorkspaceScript.permissionSignature
+        );
       }
     });
   }
@@ -265,6 +301,7 @@
         }
         document.querySelectorAll(".script-feature-btn").forEach(function (item) { item.classList.remove("active"); });
         showPanel(btn.dataset.panel, true);
+        if (btn.dataset.panel === "settingsPanel") loadPrivacySummary();
         hideScriptChromeNow();
       });
     });
@@ -314,21 +351,57 @@
   function postScriptToWorkspace(script) {
     var frame = $("scriptFrame");
     if (!frame || !frame.contentWindow || !script) return;
-    frame.contentWindow.postMessage({
-      source: "WinSpeedBallPopup",
-      type: "RUN_SCRIPT_UI",
+    closeScriptWorkspaceChannel();
+    pendingWorkspaceScript = {
       name: script.name || "",
-      code: script.code || ""
-    }, "*");
+      code: script.code || "",
+      permissionConfirmed: script.permissionConfirmed === true,
+      permissionSignature: String(script.permissionSignature || "")
+    };
+    scriptWorkspaceReady = false;
+    douyinBridgeDecision = null;
+    scriptWorkspaceRunSequence += 1;
+    frame.src = chrome.runtime.getURL("script_workspace.html") + "?run=" + scriptWorkspaceRunSequence;
   }
 
-  function postToScriptFrame(message) {
-    var frame = $("scriptFrame");
-    if (frame && frame.contentWindow) frame.contentWindow.postMessage(message, "*");
+  function createScriptWorkspaceRunId() {
+    try { return "legacy_" + crypto.randomUUID().replace(/-/g, ""); }
+    catch (e) { return "legacy_" + Date.now().toString(36) + Math.random().toString(36).slice(2); }
+  }
+
+  function closeScriptWorkspaceChannel() {
+    scriptWorkspaceReady = false;
+    scriptWorkspaceRunId = "";
+    scriptWorkspaceAutomationAllowed = false;
+    if (!scriptWorkspacePort) return;
+    try { scriptWorkspacePort.close(); } catch (e) {}
+    scriptWorkspacePort = null;
+  }
+
+  function isScriptWorkspaceEnvelope(data, runId, allowedTypes) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+    var keys = Object.keys(data);
+    if (keys.some(function (key) { return ["channel", "protocolVersion", "runId", "type", "payload"].indexOf(key) < 0; })) return false;
+    return data.channel === SCRIPT_WORKSPACE_CHANNEL &&
+      data.protocolVersion === SCRIPT_WORKSPACE_PROTOCOL_VERSION &&
+      data.runId === runId &&
+      allowedTypes.indexOf(data.type) >= 0 &&
+      data.payload && typeof data.payload === "object" && !Array.isArray(data.payload);
+  }
+
+  function postToScriptWorkspace(type, payload) {
+    if (!scriptWorkspaceReady || !scriptWorkspacePort || !scriptWorkspaceRunId) return;
+    scriptWorkspacePort.postMessage({
+      channel: SCRIPT_WORKSPACE_CHANNEL,
+      protocolVersion: SCRIPT_WORKSPACE_PROTOCOL_VERSION,
+      runId: scriptWorkspaceRunId,
+      type: type,
+      payload: payload || {}
+    });
   }
 
   function postDouyinState(ok, message) {
-    postToScriptFrame({
+    postToScriptWorkspace("BRIDGE_STATE", {
       source: "DouyinPanelHost",
       type: "STATE",
       ok: ok !== false,
@@ -373,6 +446,19 @@
 
   function handleDouyinPanelMessage(data) {
     var payload = data.payload || {};
+    if (["START", "NEXT", "SET_INTERVAL"].indexOf(data.action) >= 0) {
+      if (!scriptWorkspaceAutomationAllowed) {
+        postDouyinState(false, "\u811a\u672c\u672a\u58f0\u660e\u6216\u672a\u786e\u8ba4 @permission automation\uff0c\u5df2\u62d2\u7edd\u81ea\u52a8\u5316\u64cd\u4f5c\u3002");
+        return;
+      }
+      if (douyinBridgeDecision == null) {
+        douyinBridgeDecision = window.confirm("脚本“" + (lastWorkspaceScript && lastWorkspaceScript.name || "未命名脚本") + "”请求控制网页自动翻页。仅在你信任该脚本时允许。是否继续？");
+      }
+      if (!douyinBridgeDecision) {
+        postDouyinState(false, "已拒绝脚本的自动翻页请求。");
+        return;
+      }
+    }
     if (data.action === "START") startDouyinPanel(payload.interval);
     else if (data.action === "STOP") stopDouyinPanel();
     else if (data.action === "NEXT") {
@@ -456,8 +542,13 @@
     sendBookCommand("GET_STATE");
   }
 
-  function showScriptWorkspaceUi(name, code) {
-    lastWorkspaceScript = { name: name || text("\u811a\u672c\u754c\u9762"), code: code || "" };
+  function showScriptWorkspaceUi(name, code, permissionConfirmed, confirmedPermissionSignature) {
+    lastWorkspaceScript = {
+      name: name || text("\u811a\u672c\u754c\u9762"),
+      code: code || "",
+      permissionConfirmed: permissionConfirmed === true,
+      permissionSignature: String(confirmedPermissionSignature || "")
+    };
     $("scriptRunnerTitle").textContent = lastWorkspaceScript.name;
     enterScriptWorkspace();
     document.body.classList.add("script-ui-active");
@@ -1468,6 +1559,107 @@
     });
   }
 
+  var privacyLabels = {
+    screenshots: "截图",
+    ocr: "OCR 记录",
+    ai: "AI 历史",
+    logs: "日志",
+    scripts: "用户脚本",
+    account: "账户数据",
+    all: "全部隐私数据"
+  };
+
+  function renderPrivacySummary(response) {
+    if (!response || !response.ok) {
+      $("privacyStatus").textContent = "隐私数据读取失败：" + (response && response.error || "未知错误");
+      return;
+    }
+    (response.categories || []).forEach(function (category) {
+      var count = document.querySelector('[data-privacy-count="' + category.id + '"]');
+      if (count) count.textContent = String(Number(category.count || 0));
+    });
+    $("privacyStatus").textContent = "数据仅保存在当前浏览器。删除后无法恢复。";
+  }
+
+  function loadPrivacySummary() {
+    if (!$("privacyStatus")) return Promise.resolve();
+    $("privacyStatus").textContent = "正在读取本地数据...";
+    return sendMessage({ action: "getPrivacySummary" }).then(function (response) {
+      renderPrivacySummary(response);
+      return response;
+    });
+  }
+
+  function refreshAfterPrivacyClear(category) {
+    if (category === "screenshots" || category === "all") {
+      lastCaptureDataUrl = "";
+      var preview = $("capturePreview");
+      preview.removeAttribute("src");
+      preview.style.display = "none";
+    }
+    if (category === "ocr" || category === "all") {
+      ocrRunId += 1;
+      $("ocrText").value = "";
+      $("ocrStatus").textContent = "OCR 记录已删除。";
+    }
+    if (category === "ai" || category === "all") {
+      aiController.clearHistory();
+      $("aiQuestion").value = "";
+      $("aiAnswer").value = "";
+    }
+    if (category === "logs" || category === "all") {
+      logs = [];
+      logsLoaded = true;
+      renderLogs();
+    }
+    if (category === "scripts" || category === "all") {
+      loadScriptRows();
+      developerController.loadDraft();
+    }
+    if (category === "account" || category === "all") {
+      loadUserSession();
+      loadUsageDeclaration();
+    }
+  }
+
+  function clearPrivacyData(category) {
+    var label = privacyLabels[category] || category;
+    var warning = category === "account" || category === "all"
+      ? "此操作会删除" + label + "，退出当前本地账户，并清除本机声明确认记录。删除后无法恢复，确定继续吗？"
+      : "确定删除" + label + "吗？删除后无法恢复。";
+    if (!window.confirm(warning)) return;
+    $("privacyStatus").textContent = "正在删除" + label + "...";
+    var stopSdkSession = (category === "scripts" || category === "all") && sdkSessionController.isActive()
+      ? sdkSessionController.stop()
+      : Promise.resolve();
+    if (category === "scripts" || category === "all") {
+      closeScriptWorkspaceChannel();
+      pendingWorkspaceScript = null;
+      scriptWorkspaceReady = false;
+      lastWorkspaceScript = null;
+      var scriptFrame = $("scriptFrame");
+      if (scriptFrame) scriptFrame.src = chrome.runtime.getURL("script_workspace.html") + "?cleared=" + Date.now();
+    }
+    stopSdkSession.then(function () {
+      return sendMessage({ action: "clearPrivacyData", payload: { category: category, confirmed: true } });
+    }).then(function (response) {
+      if (!response || !response.ok) {
+        $("privacyStatus").textContent = "删除失败：" + (response && response.error || "未知错误");
+        return;
+      }
+      refreshAfterPrivacyClear(category);
+      renderPrivacySummary(response);
+      $("privacyStatus").textContent = label + "已删除。";
+    });
+  }
+
+  function bindPrivacyCenter() {
+    document.querySelectorAll(".privacy-clear-btn").forEach(function (button) {
+      button.addEventListener("click", function () { clearPrivacyData(button.dataset.privacyCategory); });
+    });
+    $("clearAllPrivacyBtn").addEventListener("click", function () { clearPrivacyData("all"); });
+  }
+
   function parseUserScriptMeta(code) {
     var meta = { name: "", property: "", description: "", version: "", matches: [], includes: [], excludes: [], permissions: [], runAt: "" };
     var textCode = String(code || "");
@@ -1508,10 +1700,10 @@
     }
     var permissions = Array.isArray(meta && meta.permissions) ? meta.permissions : [];
     if (!permissions.length) {
-      return { ok: false, error: text("\u811a\u672c\u5fc5\u987b\u58f0\u660e @permission\uff0c\u53ef\u7528\u503c\uff1adom\u3001network\u3002") };
+      return { ok: false, error: text("\u811a\u672c\u5fc5\u987b\u58f0\u660e @permission\uff0c\u53ef\u7528\u503c\uff1adom\u3001network\u3001automation\u3002") };
     }
-    if (permissions.some(function (permission) { return ["dom", "network"].indexOf(permission) < 0; })) {
-      return { ok: false, error: text("\u811a\u672c\u5305\u542b\u4e0d\u652f\u6301\u7684 @permission\uff0c\u5f53\u524d\u4ec5\u652f\u6301 dom \u548c network\u3002") };
+    if (permissions.some(function (permission) { return ["dom", "network", "automation"].indexOf(permission) < 0; })) {
+      return { ok: false, error: text("\u811a\u672c\u5305\u542b\u4e0d\u652f\u6301\u7684 @permission\uff0c\u5f53\u524d\u4ec5\u652f\u6301 dom\u3001network \u548c automation\u3002") };
     }
     meta.property = property;
     meta.permissions = permissions.slice().sort();
@@ -1531,6 +1723,7 @@
     return permissions.map(function (permission) {
       if (permission === "dom") return "- dom：读取和修改当前网页内容";
       if (permission === "network") return "- network：发起受网页跨域规则限制的网络请求";
+      if (permission === "automation") return "- automation：允许脚本请求自动翻页和下一条操作";
       return "- " + permission;
     }).join("\n");
   }
@@ -1603,7 +1796,7 @@
     return confirmInputPermissions(input).then(function (permissionResult) {
       if (!permissionResult.ok) return permissionResult;
       if (!userScriptsAvailable) return { ok: false, code: "USER_SCRIPTS_DISABLED", error: userScriptsEnableInstruction() };
-      if (openWorkspace) showScriptWorkspaceUi(script.name, script.code);
+      if (openWorkspace) showScriptWorkspaceUi(script.name, script.code, true, permissionSignature(permissionResult.meta));
       var startedAt = Date.now();
       addDetailedLog("\u811a\u672c", "\u5f00\u59cb\u6267\u884c", {
         \u540d\u79f0: script.name || "\u672a\u547d\u540d",
@@ -2081,8 +2274,88 @@
     });
   }
 
+  function validLegacyBridgeRequest(payload) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+    if (Object.keys(payload).some(function (key) { return ["action", "payload"].indexOf(key) < 0; })) return false;
+    if (["START", "STOP", "NEXT", "SET_INTERVAL", "GET_STATE"].indexOf(payload.action) < 0) return false;
+    var detail = payload.payload || {};
+    if (!detail || typeof detail !== "object" || Array.isArray(detail)) return false;
+    var detailKeys = Object.keys(detail);
+    if (["START", "SET_INTERVAL"].indexOf(payload.action) >= 0) {
+      return detailKeys.every(function (key) { return key === "interval"; }) &&
+        (detail.interval == null || (typeof detail.interval === "number" && Number.isFinite(detail.interval)));
+    }
+    return detailKeys.length === 0;
+  }
+
+  function openScriptWorkspaceChannel(workspaceFrame, script) {
+    closeScriptWorkspaceChannel();
+    var runId = createScriptWorkspaceRunId();
+    var channel = new MessageChannel();
+    var port = channel.port1;
+    var parsedMeta = parseUserScriptMeta(script.code);
+    var declaredSignature = permissionSignature(parsedMeta);
+    scriptWorkspacePort = port;
+    scriptWorkspaceRunId = runId;
+    scriptWorkspaceAutomationAllowed = script.permissionConfirmed === true &&
+      script.permissionSignature === declaredSignature &&
+      parsedMeta.permissions.indexOf("automation") >= 0;
+    port.onmessage = function (event) {
+      if (scriptWorkspacePort !== port || scriptWorkspaceRunId !== runId) return;
+      var data = event.data;
+      if (!isScriptWorkspaceEnvelope(data, runId, ["READY", "RESULT", "POINTER_MOVE", "BRIDGE_REQUEST", "PROTOCOL_ERROR"])) return;
+      if (data.type === "READY") {
+        if (scriptWorkspaceReady || Object.keys(data.payload).length) return;
+        scriptWorkspaceReady = true;
+        postToScriptWorkspace("RUN_SCRIPT_UI", { name: script.name, code: script.code });
+        return;
+      }
+      if (!scriptWorkspaceReady) return;
+      if (data.type === "BRIDGE_REQUEST") {
+        if (validLegacyBridgeRequest(data.payload)) handleDouyinPanelMessage(data.payload);
+        return;
+      }
+      if (data.type === "POINTER_MOVE") {
+        if (Object.keys(data.payload).some(function (key) { return ["clientX", "clientY"].indexOf(key) < 0; })) return;
+        if (!Number.isFinite(data.payload.clientX) || !Number.isFinite(data.payload.clientY)) return;
+        var rect = workspaceFrame.getBoundingClientRect();
+        document.dispatchEvent(new MouseEvent("mousemove", {
+          clientX: rect.left + data.payload.clientX,
+          clientY: rect.top + data.payload.clientY
+        }));
+        return;
+      }
+      if (data.type === "PROTOCOL_ERROR") {
+        $("scriptStatus").textContent = text("\u811a\u672c\u5de5\u4f5c\u533a\u534f\u8bae\u9519\u8bef\uff1a") + String(data.payload.error || text("\u672a\u77e5\u9519\u8bef"));
+        return;
+      }
+      if (data.type === "RESULT" && data.payload.ok === false) {
+        $("scriptStatus").textContent = text("\u811a\u672c\u754c\u9762\u8fd0\u884c\u5931\u8d25\uff1a") + (data.payload.error || text("\u672a\u77e5\u9519\u8bef"));
+      }
+    };
+    port.onmessageerror = function () {
+      if (scriptWorkspacePort === port) closeScriptWorkspaceChannel();
+    };
+    if (typeof port.start === "function") port.start();
+    workspaceFrame.contentWindow.postMessage({
+      channel: SCRIPT_WORKSPACE_CHANNEL,
+      protocolVersion: SCRIPT_WORKSPACE_PROTOCOL_VERSION,
+      runId: runId,
+      type: "INIT",
+      payload: {}
+    }, "*", [channel.port2]);
+  }
+
   function bindScripts() {
     loadUserScriptsStatus();
+    var workspaceFrame = $("scriptFrame");
+    workspaceFrame.addEventListener("load", function () {
+      closeScriptWorkspaceChannel();
+      if (!pendingWorkspaceScript) return;
+      var script = pendingWorkspaceScript;
+      pendingWorkspaceScript = null;
+      openScriptWorkspaceChannel(workspaceFrame, script);
+    });
     $("addScriptRowBtn").addEventListener("click", function (event) {
       event.preventDefault();
       event.stopPropagation();
@@ -2100,27 +2373,7 @@
     $("reloadScriptUiBtn").addEventListener("click", function () {
       postScriptToWorkspace(lastWorkspaceScript);
     });
-    window.addEventListener("message", function (event) {
-      var frame = $("scriptFrame");
-      if (!frame || event.source !== frame.contentWindow) return;
-      var data = event.data || {};
-      if (data.source === "DouyinPanelScript") {
-        handleDouyinPanelMessage(data);
-        return;
-      }
-      if (data.source !== "WinSpeedBallScriptWorkspace") return;
-      if (data.type === "POINTER_MOVE") {
-        var rect = frame.getBoundingClientRect();
-        document.dispatchEvent(new MouseEvent("mousemove", {
-          clientX: rect.left + Number(data.clientX || 0),
-          clientY: rect.top + Number(data.clientY || 0)
-        }));
-        return;
-      }
-      if (!data.ok) {
-        $("scriptStatus").textContent = text("\u811a\u672c\u754c\u9762\u8fd0\u884c\u5931\u8d25\uff1a") + (data.error || text("\u672a\u77e5\u9519\u8bef"));
-      }
-    });
+    window.addEventListener("pagehide", closeScriptWorkspaceChannel);
     loadScriptRows();
   }
 
@@ -2134,11 +2387,16 @@
   bindAccount();
   bindDeclaration();
   bindSettings();
+  bindPrivacyCenter();
+  developerController.bind();
+  sdkSessionController.bind();
   bindScripts();
   bindLogs();
   loadLogs();
   restorePopupStateOnOpen();
   loadSettings();
+  loadPrivacySummary();
+  developerController.loadStatus();
   loadUsageDeclaration();
   loadUserSession();
   loadManualCapture();

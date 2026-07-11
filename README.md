@@ -14,6 +14,8 @@
 - 本地用户注册、登录、退出、资料修改、改密和账户删除
 - 首次使用声明、禁止用途说明和版本化确认记录
 - 顶部固定按钮，可将浏览器原生弹窗打开为持续停留的独立小窗口
+- 默认隐藏的 Developer Mode，提供 SDK 文档、多草稿编辑器、受限沙箱运行和真实 API 测试
+- `WSB.video`、`WSB.page`、`WSB.ai`、`WSB.ocr.latest` 与按脚本隔离的 `WSB.storage`
 
 ## 在 Microsoft Edge 中安装
 
@@ -43,7 +45,7 @@
 // ==/UserScript==
 ```
 
-当前支持 `dom` 和 `network`。首次运行或权限变化后，扩展会再次请求用户确认。
+当前兼容层支持 `dom`、`network` 和用于宿主自动翻页桥接的 `automation`。首次运行或权限变化后，扩展会再次请求用户确认。新 SDK 脚本应改用 `@wsb-capability`，不能与旧 `@permission` 混用。
 
 ## OCR 与 AI 使用方法
 
@@ -79,8 +81,18 @@
 - `background.js`：扩展生命周期、标签页控制、OCR 和自动翻页编排。
 - `background/storage-service.js`：本地存储、后台日志和截图 IndexedDB。
 - `background/declaration-service.js`：使用声明内容、版本、摘要和确认记录。
-- `background/user-service.js`：本地账户、密码摘要、登录会话和账户生命周期。
-- `background/window-service.js`：固定窗口创建、复用、聚焦和关闭状态清理。
+- `background/user-service.js`：LocalUserProvider 实现、本地账户、密码摘要和会话生命周期。
+- `background/user-provider.js`：UserProvider 契约、注册表和活动 Provider 门面。
+- `background/subscription-service.js`：Free、Pro、Enterprise 计划和额度接口预留，不包含支付。
+- `background/feature-gate.js`：功能登记、计划查询和统一能力判定。
+- `background/developer-mode-service.js`：Developer Mode 开关、FeatureGate 校验和 SDK 状态。
+- `background/privacy-service.js`：统计和清理本地截图、OCR、AI 历史、日志、用户脚本及账户数据。
+- `background/window-service.js`：固定窗口找回、位置和大小持久化，以及关闭后重新打开恢复。
+- `sdk/contracts.js`：3.5.0 SDK Beta 的公开 API、事件、能力和版本化请求协议。
+- `sdk/script-runner.js`、`sdk/script-worker.js`：独立 Worker、私有 MessagePort、超时终止和运行全局限制。
+- `background/permission-service.js`：SDK 能力授权、代码与来源绑定、短期运行令牌和撤销。
+- `background/sdk-context-service.js`：一次性标签页、来源和能力确认，防止确认期间页面切换。
+- `background/sdk-service.js`：经过权限和 FeatureGate 校验的真实 Video、Page、AI、OCR 与 Storage 调度。
 - `background/ai-providers.js`：不同 AI 服务的请求协议、响应解析、超时和安全校验。
 - `background/ai-service.js`：AI Provider 选择、独立配置、旧数据迁移和 OCR 结果关联。
 - `background/ocr-service.js`：离屏 OCR 调度、任务状态、结果处理和自动 AI。
@@ -92,6 +104,8 @@
 - `popup/popup-storage.js`：弹窗本地存储访问层。
 - `popup/message-client.js`：弹窗后台消息和网站授权客户端。
 - `popup/ai-controller.js`：AI 提示词、请求状态和历史记录控制。
+- `popup/developer-controller.js`：开发者文档、多草稿管理、声明校验和真实 API 测试。
+- `popup/sdk-session-controller.js`：SDK 授权确认、沙箱会话、RPC 转发和停止撤销。
 - `popup.js`：视频、OCR、设置、脚本和导航界面编排。
 - `content/player-adapters.js`：HTML5 播放器控制能力与 YouTube、Bilibili 站点识别。
 - `content_script.js`：页面媒体注册表、增量 DOM 扫描、区域截图和页面文字提取。
@@ -100,40 +114,24 @@
 
 ## 验证
 
-项目不需要构建步骤。修改后可以执行：
+项目不需要构建步骤。修改后执行全部脚本语法检查：
 
 ```powershell
-node --check background.js
-node --check background/storage-service.js
-node --check background/declaration-service.js
-node --check background/user-service.js
-node --check background/window-service.js
-node --check background/ai-providers.js
-node --check background/ai-service.js
-node --check background/ocr-service.js
-node --check background/video-service.js
-node --check background/message-schema.js
-node --check background/message-router.js
-node --check background/user-script-service.js
-node --check popup/popup-utils.js
-node --check popup/popup-storage.js
-node --check popup/message-client.js
-node --check popup/ai-controller.js
-node --check content/player-adapters.js
-node --check content_script.js
-node --check popup.js
-node --check ocr.js
-node --check ocr_worker.js
-node --check script_workspace.js
-node --check shadow_hook.js
+$files = rg --files -g '*.js' -g '*.mjs'
+foreach ($file in $files) { node --check $file }
 ```
 
-AI Provider、旧配置迁移和消息兼容测试：
+执行全部自动化测试：
 
 ```powershell
-node --test tests/ai-provider.test.js
-node --test tests/user-declaration.test.js
-node --test tests/window-service.test.js
+$tests = Get-ChildItem tests -Filter '*.test.js' | ForEach-Object { $_.FullName }
+node --test $tests
+```
+
+安装 Microsoft Edge 和 Playwright 后，可以执行真实扩展端到端测试。脚本会自动查找 Edge 与本机 Codex 运行时中的 Playwright；其他环境可通过 `EDGE_EXECUTABLE_PATH` 和 `WSB_PLAYWRIGHT_MODULE` 指定路径：
+
+```powershell
+node tests/edge-extension-e2e.mjs
 ```
 
 `docs/ocr-runtime-test.html` 用于验证项目内置 Tesseract、WASM 核心和英文语言包能否实际识别测试图片。

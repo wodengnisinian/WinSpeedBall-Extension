@@ -6,9 +6,17 @@
   var nativeWinAdd = window.addEventListener.bind(window);
   var nativeDocWrite = document.write.bind(document);
   var nativeDocWriteln = document.writeln.bind(document);
+  var nativeWinDispatch = window.dispatchEvent.bind(window);
+  var NativeMessageEvent = window.MessageEvent;
   var gmValueStore = {};
   var baselineHeadNodes = Array.prototype.slice.call(document.head.children);
   var lastPointerSentAt = 0;
+  var workspacePort = null;
+  var workspacePortPost = null;
+  var workspaceRunId = "";
+  var workspaceHasRun = false;
+  var SCRIPT_WORKSPACE_CHANNEL = "WSB_LEGACY_WORKSPACE";
+  var SCRIPT_WORKSPACE_PROTOCOL_VERSION = 1;
 
   function ensureRoot() {
     if (root && root.isConnected) return root;
@@ -132,12 +140,12 @@
     document.writeln = nativeDocWriteln;
   }
 
-  function installGmApis(payload) {
+  function installGmApis(payload, scriptWindowFacade) {
     var menuArea = null;
     var menuSeq = 0;
     var storagePrefix = "wsb:" + (payload.name || "script") + ":";
 
-    window.unsafeWindow = window;
+    window.unsafeWindow = scriptWindowFacade;
     window.GM_info = {
       script: {
         name: payload.name || "",
@@ -206,19 +214,90 @@
     };
   }
 
+  function isWorkspaceEnvelope(data, allowedTypes) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+    if (Object.keys(data).some(function (key) { return ["channel", "protocolVersion", "runId", "type", "payload"].indexOf(key) < 0; })) return false;
+    return data.channel === SCRIPT_WORKSPACE_CHANNEL &&
+      data.protocolVersion === SCRIPT_WORKSPACE_PROTOCOL_VERSION &&
+      data.runId === workspaceRunId &&
+      allowedTypes.indexOf(data.type) >= 0 &&
+      data.payload && typeof data.payload === "object" && !Array.isArray(data.payload);
+  }
+
+  function sendWorkspaceMessage(type, payload) {
+    if (!workspacePortPost || !workspaceRunId) return;
+    workspacePortPost({
+      channel: SCRIPT_WORKSPACE_CHANNEL,
+      protocolVersion: SCRIPT_WORKSPACE_PROTOCOL_VERSION,
+      runId: workspaceRunId,
+      type: type,
+      payload: payload || {}
+    });
+  }
+
+  function forwardLegacyPostMessage(message) {
+    if (!message || typeof message !== "object" || Array.isArray(message)) return;
+    if (message.source !== "DouyinPanelScript") return;
+    if (["START", "STOP", "NEXT", "SET_INTERVAL", "GET_STATE"].indexOf(message.action) < 0) return;
+    var payload = message.payload || {};
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
+    sendWorkspaceMessage("BRIDGE_REQUEST", { action: message.action, payload: payload });
+  }
+
+  function createScriptFacades() {
+    var parentFacade = Object.freeze({ postMessage: forwardLegacyPostMessage });
+    var scriptWindowFacade;
+    scriptWindowFacade = new Proxy(Object.create(null), {
+      get: function (_target, key) {
+        if (key === "parent" || key === "top") return parentFacade;
+        if (key === "window" || key === "self" || key === "globalThis") return scriptWindowFacade;
+        var value = window[key];
+        return typeof value === "function" ? value.bind(window) : value;
+      },
+      set: function (_target, key, value) {
+        if (key === "parent" || key === "top") return false;
+        window[key] = value;
+        return true;
+      },
+      has: function (_target, key) {
+        return key === "parent" || key === "top" || key in window;
+      },
+      deleteProperty: function (_target, key) {
+        if (key === "parent" || key === "top") return false;
+        return delete window[key];
+      }
+    });
+    return { parent: parentFacade, window: scriptWindowFacade };
+  }
+
+  function dispatchLegacyBridgeState(payload) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
+    nativeWinDispatch(new NativeMessageEvent("message", {
+      data: payload,
+      origin: "null"
+    }));
+  }
+
   function runScript(payload) {
     restorePatchedApis();
     clearWorkspace();
     try {
       patchReadyEvents();
       patchDocumentWrite();
-      installGmApis(payload);
-      new Function(String(payload.code || ""))();
+      var facades = createScriptFacades();
+      installGmApis(payload, facades.window);
+      new Function("window", "parent", "top", "self", "globalThis", String(payload.code || ""))(
+        facades.window,
+        facades.parent,
+        facades.parent,
+        facades.window,
+        facades.window
+      );
       setTimeout(function () { showNoUiHint(payload.name); }, 800);
-      window.parent.postMessage({ source: "WinSpeedBallScriptWorkspace", ok: true, name: payload.name || "" }, "*");
+      sendWorkspaceMessage("RESULT", { ok: true, name: payload.name || "" });
     } catch (error) {
       showError(error);
-      window.parent.postMessage({ source: "WinSpeedBallScriptWorkspace", ok: false, error: error.message || String(error) }, "*");
+      sendWorkspaceMessage("RESULT", { ok: false, error: error.message || String(error) });
     }
   }
 
@@ -226,18 +305,49 @@
     var now = Date.now();
     if (now - lastPointerSentAt < 30) return;
     lastPointerSentAt = now;
-    window.parent.postMessage({
-      source: "WinSpeedBallScriptWorkspace",
-      type: "POINTER_MOVE",
+    sendWorkspaceMessage("POINTER_MOVE", {
       clientX: event.clientX,
       clientY: event.clientY
-    }, "*");
+    });
   }, true);
 
-  window.addEventListener("message", function (event) {
-    if (event.source !== window.parent) return;
-    var data = event.data || {};
-    if (data.source !== "WinSpeedBallPopup" || data.type !== "RUN_SCRIPT_UI") return;
-    runScript(data);
+  function handleWorkspacePortMessage(event) {
+    var data = event.data;
+    if (!isWorkspaceEnvelope(data, ["RUN_SCRIPT_UI", "BRIDGE_STATE", "TERMINATE"])) return;
+    if (data.type === "RUN_SCRIPT_UI") {
+      if (workspaceHasRun || Object.keys(data.payload).some(function (key) { return ["name", "code"].indexOf(key) < 0; })) return;
+      if (typeof data.payload.name !== "string" || typeof data.payload.code !== "string" || data.payload.code.length > 200000) return;
+      workspaceHasRun = true;
+      runScript(data.payload);
+      return;
+    }
+    if (!workspaceHasRun) return;
+    if (data.type === "BRIDGE_STATE") {
+      dispatchLegacyBridgeState(data.payload);
+      return;
+    }
+    if (data.type === "TERMINATE") {
+      try { workspacePort.close(); } catch (e) {}
+      workspacePort = null;
+      workspacePortPost = null;
+      workspaceRunId = "";
+    }
+  }
+
+  nativeWinAdd("message", function (event) {
+    if (workspacePort || event.source !== window.parent) return;
+    var data = event.data;
+    if (!data || typeof data !== "object" || Array.isArray(data)) return;
+    if (Object.keys(data).some(function (key) { return ["channel", "protocolVersion", "runId", "type", "payload"].indexOf(key) < 0; })) return;
+    if (data.channel !== SCRIPT_WORKSPACE_CHANNEL || data.protocolVersion !== SCRIPT_WORKSPACE_PROTOCOL_VERSION || data.type !== "INIT") return;
+    if (typeof data.runId !== "string" || !/^legacy_[A-Za-z0-9_-]{12,80}$/.test(data.runId)) return;
+    if (!data.payload || Object.keys(data.payload).length || !event.ports || event.ports.length !== 1) return;
+    workspacePort = event.ports[0];
+    workspacePortPost = workspacePort.postMessage.bind(workspacePort);
+    workspaceRunId = data.runId;
+    workspaceHasRun = false;
+    workspacePort.onmessage = handleWorkspacePortMessage;
+    if (typeof workspacePort.start === "function") workspacePort.start();
+    sendWorkspaceMessage("READY", {});
   });
 })();

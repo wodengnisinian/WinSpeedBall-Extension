@@ -5,8 +5,10 @@
   var offscreenCreating = null;
   var lastProgress = { sourceTime: 0, status: "", percent: -1 };
   var requestSequence = 0;
+  var activeSourceTime = 0;
   var storage = global.WinSpeedBallStorageService;
   var ai = global.WinSpeedBallAiService;
+  var featureGate = global.WinSpeedBallFeatureGate;
 
   function lastErrorMessage() {
     return chrome.runtime.lastError ? chrome.runtime.lastError.message : "";
@@ -38,6 +40,43 @@
     return offscreenCreating;
   }
 
+  function closeOffscreen() {
+    var pending = offscreenCreating || Promise.resolve();
+    return pending.catch(function () {}).then(function () {
+      offscreenCreating = null;
+      return chrome.runtime.getContexts({
+        contextTypes: ["OFFSCREEN_DOCUMENT"],
+        documentUrls: [chrome.runtime.getURL(OCR_OFFSCREEN_PATH)]
+      }).then(function (contexts) {
+        if (!contexts || !contexts.length) return { ok: true, closed: false };
+        return chrome.offscreen.closeDocument().then(function () { return { ok: true, closed: true }; });
+      });
+    }).catch(function (error) {
+      return { ok: false, error: error && error.message || String(error) };
+    });
+  }
+
+  function finishOffscreen(sourceTime) {
+    storage.get(["ocrJobSourceTime"], function (data) {
+      if (activeSourceTime && activeSourceTime !== sourceTime) return;
+      if (Number(data.ocrJobSourceTime || 0) !== sourceTime) return;
+      activeSourceTime = 0;
+      closeOffscreen();
+    });
+  }
+
+  function cancel() {
+    return new Promise(function (resolve) {
+      storage.get(["manualCaptureTime"], function (data) {
+        var sourceTime = Number(data.manualCaptureTime || activeSourceTime || 0);
+        activeSourceTime = 0;
+        storage.set({ ocrCancelledSourceTime: sourceTime }, function () {
+          closeOffscreen().then(resolve);
+        });
+      });
+    });
+  }
+
   function updateJobState(sourceTime, status, progress, error) {
     storage.set({
       ocrJobSourceTime: sourceTime,
@@ -50,6 +89,8 @@
   }
 
   function start(dataUrl, sourceTime) {
+    activeSourceTime = sourceTime;
+    storage.set({ ocrCancelledSourceTime: 0 });
     updateJobState(sourceTime, "queued", 0, "");
     storage.appendLog("OCR", "后台任务已创建", {
       任务: "#" + String(sourceTime).slice(-8),
@@ -72,6 +113,7 @@
           var message = error || response && response.error || "OCR worker did not accept the job.";
           updateJobState(sourceTime, "failed", 0, message);
           storage.appendLog("OCR", "后台任务启动失败", { 任务: "#" + String(sourceTime).slice(-8), 原因: message });
+          finishOffscreen(sourceTime);
           return;
         }
         updateJobState(sourceTime, "recognizing", 0, "");
@@ -80,6 +122,7 @@
       var message = error && error.message ? error.message : String(error || "Could not create OCR worker.");
       updateJobState(sourceTime, "failed", 0, message);
       storage.appendLog("OCR", "隐藏工作页创建失败", { 任务: "#" + String(sourceTime).slice(-8), 原因: message });
+      finishOffscreen(sourceTime);
     });
   }
 
@@ -90,6 +133,30 @@
     return template + "\n\n" + sourceText;
   }
 
+  function callAiWhenAvailable(payload, sourceTime, callback) {
+    Promise.resolve().then(function () {
+      return featureGate.check("ai.basic");
+    }).catch(function (error) {
+      return { ok: false, allowed: false, error: error && error.message || String(error || "Feature availability could not be checked.") };
+    }).then(function (gate) {
+      storage.get(["manualCaptureTime", "ocrCancelledSourceTime"], function (current) {
+        if (Number(current.manualCaptureTime || 0) !== sourceTime || Number(current.ocrCancelledSourceTime || 0) === sourceTime) return;
+        if (!gate || gate.allowed !== true) {
+          var reason = String(gate && (gate.reason || gate.error) || "AI feature is unavailable.").slice(0, 300);
+          storage.set({
+            aiJobSourceTime: sourceTime,
+            aiJobStatus: "failed",
+            aiJobError: reason,
+            aiJobUpdatedAt: Date.now()
+          });
+          storage.appendLog("AI", "Automatic OCR request blocked by FeatureGate", { feature: "ai.basic", reason: reason });
+          return;
+        }
+        ai.call(payload, callback);
+      });
+    });
+  }
+
   function handleProgress(request) {
     var sourceTime = Number(request.sourceTime || 0);
     var status = String(request.status || "recognizing");
@@ -97,8 +164,8 @@
     if (!sourceTime) return;
     if (lastProgress.sourceTime === sourceTime && lastProgress.status === status && percent < lastProgress.percent + 5) return;
     lastProgress = { sourceTime: sourceTime, status: status, percent: percent };
-    storage.get(["manualCaptureTime"], function (data) {
-      if (Number(data.manualCaptureTime || 0) !== sourceTime) return;
+    storage.get(["manualCaptureTime", "ocrCancelledSourceTime"], function (data) {
+      if (Number(data.manualCaptureTime || 0) !== sourceTime || Number(data.ocrCancelledSourceTime || 0) === sourceTime) return;
       updateJobState(sourceTime, "recognizing", percent / 100, "");
       storage.set({ ocrJobStage: status });
     });
@@ -107,11 +174,13 @@
   function handleComplete(request) {
     var sourceTime = Number(request.sourceTime || 0);
     var recognizedText = String(request.text || "").trim();
-    storage.get(["manualCaptureTime", "manualAiSourceTime", "manualAiResponse", "autoSendOcrToAi", "autoOcrPromptTemplate"], function (data) {
-      if (!sourceTime || Number(data.manualCaptureTime || 0) !== sourceTime) {
+    storage.get(["manualCaptureTime", "ocrCancelledSourceTime", "manualAiSourceTime", "manualAiResponse", "autoSendOcrToAi", "autoOcrPromptTemplate"], function (data) {
+      if (!sourceTime || Number(data.manualCaptureTime || 0) !== sourceTime || Number(data.ocrCancelledSourceTime || 0) === sourceTime) {
         storage.appendLog("OCR", "忽略过期识别结果", { 任务: "#" + String(sourceTime).slice(-8) });
+        finishOffscreen(sourceTime);
         return;
       }
+      finishOffscreen(sourceTime);
       storage.set({
         manualOcrText: recognizedText,
         manualOcrSourceTime: sourceTime,
@@ -147,18 +216,21 @@
           OCR字数: recognizedText.length,
           提示词字数: prompt.length
         });
-        ai.call({ prompt: prompt, autoOcrSourceTime: sourceTime }, function (result) {
-          storage.set({
-            aiJobSourceTime: sourceTime,
-            aiJobStatus: result && result.ok ? "completed" : "failed",
-            aiJobError: result && result.ok ? "" : result && result.error || "AI request failed.",
-            aiJobUpdatedAt: Date.now()
-          });
-          storage.appendLog("AI", result && result.ok ? "后台自动发送成功" : "后台自动发送失败", {
-            任务: "#" + String(sourceTime).slice(-8),
-            模型: result && result.model || "-",
-            回复字数: result && result.ok ? String(result.content || "").length : 0,
-            原因: result && result.ok ? "-" : result && result.error || "未知错误"
+        callAiWhenAvailable({ prompt: prompt, autoOcrSourceTime: sourceTime }, sourceTime, function (result) {
+          storage.get(["manualCaptureTime", "ocrCancelledSourceTime"], function (current) {
+            if (Number(current.manualCaptureTime || 0) !== sourceTime || Number(current.ocrCancelledSourceTime || 0) === sourceTime) return;
+            storage.set({
+              aiJobSourceTime: sourceTime,
+              aiJobStatus: result && result.ok ? "completed" : "failed",
+              aiJobError: result && result.ok ? "" : result && result.error || "AI request failed.",
+              aiJobUpdatedAt: Date.now()
+            });
+            storage.appendLog("AI", result && result.ok ? "后台自动发送成功" : "后台自动发送失败", {
+              任务: "#" + String(sourceTime).slice(-8),
+              模型: result && result.model || "-",
+              回复字数: result && result.ok ? String(result.content || "").length : 0,
+              原因: result && result.ok ? "-" : result && result.error || "未知错误"
+            });
           });
         });
       });
@@ -168,10 +240,14 @@
   function handleFailed(request) {
     var sourceTime = Number(request.sourceTime || 0);
     var error = String(request.error || "OCR failed.");
-    storage.get(["manualCaptureTime"], function (data) {
-      if (!sourceTime || Number(data.manualCaptureTime || 0) !== sourceTime) return;
+    storage.get(["manualCaptureTime", "ocrCancelledSourceTime"], function (data) {
+      if (!sourceTime || Number(data.manualCaptureTime || 0) !== sourceTime || Number(data.ocrCancelledSourceTime || 0) === sourceTime) {
+        finishOffscreen(sourceTime);
+        return;
+      }
       updateJobState(sourceTime, "failed", 0, error);
       storage.appendLog("OCR", "后台识别失败", { 任务: "#" + String(sourceTime).slice(-8), 原因: error });
+      finishOffscreen(sourceTime);
     });
   }
 
@@ -232,6 +308,8 @@
     handleProgress: handleProgress,
     handleComplete: handleComplete,
     handleFailed: handleFailed,
+    cancel: cancel,
+    closeOffscreen: closeOffscreen,
     resume: resume,
     getManualCapture: getManualCapture,
     buildAutoPrompt: buildAutoPrompt

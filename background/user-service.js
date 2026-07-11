@@ -341,7 +341,11 @@
     if (area && typeof area.setAccessLevel === "function") area.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" }).catch(function () {});
   } catch (error) {}
 
-  global.WinSpeedBallUserService = {
+  var localUserProvider = {
+    id: "local",
+    label: "Local Account",
+    mode: "local-only",
+    getUser: getSession,
     getSession: getSession,
     register: register,
     login: login,
@@ -352,4 +356,7 @@
     validateUsername: validateUsername,
     validatePassword: validatePassword
   };
+
+  global.WinSpeedBallLocalUserProvider = localUserProvider;
+  global.WinSpeedBallUserService = localUserProvider;
 })(self);

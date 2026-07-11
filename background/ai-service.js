@@ -135,11 +135,17 @@
       callback(result);
       return;
     }
-    storage.set({
-      manualAiSourceTime: sourceTime,
-      manualAiPrompt: String(payload.prompt || ""),
-      manualAiResponse: result.content
-    }, function () { callback(result); });
+    storage.get(["manualCaptureTime", "ocrCancelledSourceTime"], function (current) {
+      if (Number(current.manualCaptureTime || 0) !== sourceTime || Number(current.ocrCancelledSourceTime || 0) === sourceTime) {
+        callback(Object.assign({}, result, { discarded: true }));
+        return;
+      }
+      storage.set({
+        manualAiSourceTime: sourceTime,
+        manualAiPrompt: String(payload.prompt || ""),
+        manualAiResponse: result.content
+      }, function () { callback(result); });
+    });
   }
 
   function call(payload, callback) {

@@ -7,13 +7,13 @@
   // Guard: skip chrome:// and edge:// internal pages
   try { if (/^(chrome|edge|about|chrome-extension):\/\//i.test(location.href)) return; } catch (e) { return; }
 
-  if (window.__WinSpeedBallLoadedVersion === "2026-07-11-player-adapters-v1") return;
+  if (window.__WinSpeedBallLoadedVersion === "2026-07-11-sdk-lifecycle-v2") return;
   var playerAdapters = window.WinSpeedBallPlayerAdapters;
   if (!playerAdapters || !playerAdapters.html5) {
     console.warn("WinSpeedBall: player adapters are not loaded.");
     return;
   }
-  window.__WinSpeedBallLoadedVersion = "2026-07-11-player-adapters-v1";
+  window.__WinSpeedBallLoadedVersion = "2026-07-11-sdk-lifecycle-v2";
   window.__WinSpeedBallLoaded = true;
   var html5Adapter = playerAdapters.html5;
 
@@ -22,6 +22,7 @@
   var volume = 0.8;
   var lastAudibleVolume = 0.8;
   var active = false;
+  var lockRequested = false;
   var keepPlaying = false;
   var lockTimer = null;
   var observerStarted = false;
@@ -37,6 +38,11 @@
   var mediaObserver = null;
   var pendingMedia = new Set();
   var mediaMetrics = { initialScans: 0, incrementalScans: 0, integrityScans: 0, mutationBatches: 0, addedNodes: 0, observedRoots: 0 };
+  var mediaIds = new WeakMap();
+  var mediaIdSequence = 0;
+  var controlMode = "stopped";
+  var explicitlyPausedMedia = new WeakSet();
+  var currentMediaTarget = null;
 
   function clamp(num, min, max) {
     return Math.max(min, Math.min(max, num));
@@ -88,11 +94,13 @@
       mediaRegistry.delete(element);
       pendingMedia.delete(element);
     });
+    if (currentMediaTarget && !mediaRegistry.has(currentMediaTarget)) currentMediaTarget = null;
   }
 
   function registerMedia(element, discovered) {
     if (!html5Adapter.isMedia(element)) return false;
     var wasRegistered = mediaRegistry.has(element);
+    if (!mediaIds.has(element)) mediaIds.set(element, "media-" + (++mediaIdSequence));
     mediaRegistry.add(element);
     if (!wasRegistered && discovered) discovered.push(element);
     if (knownMedia.has(element)) return !wasRegistered;
@@ -235,6 +243,7 @@
   }
 
   function tryPlayMedia(element) {
+    if (!keepPlaying || explicitlyPausedMedia.has(element)) return;
     html5Adapter.tryPlay(element);
   }
 
@@ -244,7 +253,7 @@
     media.forEach(function (element) {
       try {
         if (html5Adapter.needsSync(element, state)) html5Adapter.apply(element, state);
-        html5Adapter.tryPlay(element);
+        tryPlayMedia(element);
         played++;
       } catch (error) {}
     });
@@ -264,6 +273,7 @@
       muted: muted,
       volume: muted ? 0 : volume,
       keepPlaying: keepPlaying,
+      controlMode: controlMode,
       playerAdapter: player.id,
       playerType: player.label,
       mediaCount: media.length,
@@ -278,7 +288,38 @@
   }
 
   function getPrimaryMediaInfo(media) {
-    return html5Adapter.getInfo(choosePrimaryMedia(media));
+    return html5Adapter.getInfo(chooseCurrentMedia(media));
+  }
+
+  function mediaSnapshot(element) {
+    var info = html5Adapter.getInfo(element);
+    var actualRate = 1;
+    var actualVolume = 0;
+    var actualMuted = false;
+    try {
+      actualRate = Number(element.playbackRate || 1);
+      actualVolume = Number(element.volume || 0);
+      actualMuted = !!element.muted;
+    } catch (error) {}
+    return {
+      id: mediaIds.get(element) || "",
+      title: getMediaTitle(element),
+      duration: info.duration,
+      currentTime: info.currentTime,
+      progress: info.duration > 0 ? Math.max(0, Math.min(1, info.currentTime / info.duration)) : 0,
+      rate: actualRate,
+      volume: actualVolume,
+      muted: actualMuted,
+      paused: info.paused,
+      mediaType: info.tag || ""
+    };
+  }
+
+  function getMediaTitle(element) {
+    if (!element || typeof element.getAttribute !== "function") return "";
+    var title = "";
+    try { title = element.getAttribute("title") || element.getAttribute("aria-label") || ""; } catch (error) {}
+    return String(title).replace(/\s+/g, " ").trim().slice(0, 256);
   }
 
   function choosePrimaryMedia(media) {
@@ -293,8 +334,18 @@
     });
     return best;
   }
-  function startLock() {
+
+  function chooseCurrentMedia(media) {
+    if (currentMediaTarget && media.indexOf(currentMediaTarget) >= 0 && isConnectedMedia(currentMediaTarget)) {
+      return currentMediaTarget;
+    }
+    currentMediaTarget = choosePrimaryMedia(media);
+    return currentMediaTarget;
+  }
+  function startLock(explicit) {
+    if (explicit === true) lockRequested = true;
     active = true;
+    controlMode = "lock";
     if (lockTimer) return;
     lockTimer = setInterval(function () {
       if (!active) return;
@@ -304,13 +355,36 @@
     }, 1000);
   }
 
+  function stopLock() {
+    active = false;
+    lockRequested = false;
+    keepPlaying = false;
+    controlMode = "stopped";
+    explicitlyPausedMedia = new WeakSet();
+    if (lockTimer) {
+      clearInterval(lockTimer);
+      lockTimer = null;
+    }
+    if (incrementalApplyTimer) {
+      clearTimeout(incrementalApplyTimer);
+      incrementalApplyTimer = null;
+    }
+    pendingMedia.clear();
+    return buildState(collectAll(), 0);
+  }
+
+  function markApplied() {
+    if (!active) controlMode = "apply";
+  }
+
   function enableKeepPlaying() {
+    explicitlyPausedMedia = new WeakSet();
     keepPlaying = true;
     active = true;
     var ms = collectAll();
     var applied = applyToAll(ms);
     var played = playAll(ms);
-    startLock();
+    startLock(false);
     var state = buildState(ms, applied);
     state.played = played;
     return state;
@@ -318,8 +392,8 @@
 
   function disableKeepPlaying() {
     keepPlaying = false;
-    var ms = collectAll();
-    var state = buildState(ms, 0);
+    explicitlyPausedMedia = new WeakSet();
+    var state = lockRequested ? buildState(collectAll(), 0) : stopLock();
     state.played = 0;
     return state;
   }
@@ -564,31 +638,32 @@
         rate = normalizeRate(command.rate);
         ms = collectAll();
         applied = applyToAll(ms);
-        startLock();
+        markApplied();
         return buildState(ms, applied);
 
       case "STEP_UP":
         rate = normalizeRate(rate + 0.25);
         ms = collectAll();
         applied = applyToAll(ms);
-        startLock();
+        markApplied();
         return buildState(ms, applied);
 
       case "STEP_DOWN":
         rate = normalizeRate(rate - 0.25);
         ms = collectAll();
         applied = applyToAll(ms);
-        startLock();
+        markApplied();
         return buildState(ms, applied);
 
       case "RESET":
+        stopLock();
         rate = 1.0;
         muted = false;
         volume = 0.8;
         lastAudibleVolume = 0.8;
         ms = collectAll();
         applied = applyToAll(ms);
-        startLock();
+        markApplied();
         return buildState(ms, applied);
 
       case "SET_MUTED":
@@ -597,7 +672,7 @@
         if (!muted && volume === 0) volume = lastAudibleVolume || 0.8;
         ms = collectAll();
         applied = applyToAll(ms);
-        startLock();
+        markApplied();
         return buildState(ms, applied);
 
       case "TOGGLE_MUTED":
@@ -606,7 +681,7 @@
         if (!muted && volume === 0) volume = lastAudibleVolume || 0.8;
         ms = collectAll();
         applied = applyToAll(ms);
-        startLock();
+        markApplied();
         return buildState(ms, applied);
 
       case "SET_VOLUME":
@@ -619,7 +694,7 @@
         }
         ms = collectAll();
         applied = applyToAll(ms);
-        startLock();
+        markApplied();
         return buildState(ms, applied);
 
       case "ENABLE_AUTOPLAY":
@@ -627,6 +702,49 @@
 
       case "DISABLE_AUTOPLAY":
         return disableKeepPlaying();
+
+      case "LOCK_STATE":
+        ms = collectAll();
+        applied = applyToAll(ms);
+        startLock(true);
+        return buildState(ms, applied);
+
+      case "STOP_LOCK":
+        return stopLock();
+
+      case "PLAY":
+        ms = collectAll();
+        var playTarget = chooseCurrentMedia(ms);
+        if (!playTarget) return { ok: false, error: "No controllable media was found.", mediaCount: 0, applied: 0, frameResults: [] };
+        var wasExplicitlyPaused = explicitlyPausedMedia.has(playTarget);
+        explicitlyPausedMedia.delete(playTarget);
+        try {
+          var playResult = playTarget.play();
+          return Promise.resolve(playResult).then(function () { return buildState(ms, 0); }).catch(function (error) {
+            if (wasExplicitlyPaused) explicitlyPausedMedia.add(playTarget);
+            return { ok: false, code: "PLAYBACK_BLOCKED", error: error && error.message || "Playback was blocked.", mediaCount: ms.length, applied: 0, frameResults: [] };
+          });
+        } catch (error) {
+          if (wasExplicitlyPaused) explicitlyPausedMedia.add(playTarget);
+          return { ok: false, code: "PLAYBACK_BLOCKED", error: error.message || String(error), mediaCount: ms.length, applied: 0, frameResults: [] };
+        }
+
+      case "PAUSE":
+        ms = collectAll();
+        var pauseTarget = chooseCurrentMedia(ms);
+        if (!pauseTarget) return { ok: false, error: "No controllable media was found.", mediaCount: 0, applied: 0, frameResults: [] };
+        explicitlyPausedMedia.add(pauseTarget);
+        try { pauseTarget.pause(); } catch (error) {
+          explicitlyPausedMedia.delete(pauseTarget);
+          return { ok: false, error: error.message || String(error), mediaCount: ms.length, applied: 0, frameResults: [] };
+        }
+        return buildState(ms, 0);
+
+      case "GET_MEDIA_LIST":
+        ms = collectAll();
+        var listState = buildState(ms, 0);
+        listState.media = ms.map(mediaSnapshot);
+        return listState;
 
       case "GET_STATUS":
         ms = collectAll();
@@ -650,9 +768,9 @@
   startObserver();
 
   document.addEventListener("play", function (event) {
-    if (active && event.target && /^(VIDEO|AUDIO)$/.test(event.target.tagName)) {
-      try { applyToMedia(event.target); } catch (e) {}
-    }
+    if (!event.target || !/^(VIDEO|AUDIO)$/.test(event.target.tagName)) return;
+    currentMediaTarget = event.target;
+    if (active) try { applyToMedia(event.target); } catch (e) {}
   }, true);
 
   document.addEventListener("loadedmetadata", function (event) {
@@ -676,12 +794,19 @@
     if (keepPlaying) setTimeout(function () { playAll(collectAll()); }, 120);
   }, true);
 
+  window.addEventListener("pagehide", function () { stopLock(); }, true);
+
   chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     if (!request || request.version !== 1 || request.source !== "background" || !request.payload || !sender || sender.id !== chrome.runtime.id || sender.tab) {
       sendResponse({ ok: false, error: "Unauthorized command.", mediaCount: 0, applied: 0, frameResults: [] });
       return true;
     }
-    sendResponse(handleCommand(request.payload.command));
+    var result = handleCommand(request.payload.command);
+    if (result && typeof result.then === "function") {
+      result.then(sendResponse).catch(function (error) { sendResponse({ ok: false, error: error && error.message || String(error) }); });
+    } else {
+      sendResponse(result);
+    }
     return true;
   });
 

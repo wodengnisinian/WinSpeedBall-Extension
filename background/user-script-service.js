@@ -4,6 +4,7 @@
   var REGISTERED_PREFIX = "wsb-user-";
   var WORLD_PREFIX = "wsb_world_";
   var MAX_CODE_LENGTH = 200000;
+  var syncQueue = Promise.resolve();
 
   function disabledError() {
     var error = new Error("请开启浏览器要求的用户脚本开关或开发者模式，然后重新加载扩展。");
@@ -75,21 +76,37 @@
     };
   }
 
-  function sync(scripts) {
+  function syncNow(scripts) {
     scripts = Array.isArray(scripts) ? scripts : [];
     return ensureAvailable().then(function (registered) {
-      var oldIds = (registered || []).map(function (script) { return script.id; }).filter(function (id) { return id.indexOf(REGISTERED_PREFIX) === 0; });
-      var remove = oldIds.length ? chrome.userScripts.unregister({ ids: oldIds }) : Promise.resolve();
-      return remove.then(function () {
-        var eligible = scripts.filter(validStoredScript);
-        if (!eligible.length) return { available: true, registered: 0 };
-        return Promise.all(eligible.map(function (script) { return prepareWorld(script.id); })).then(function () {
-          return chrome.userScripts.register(eligible.map(buildRegistration));
-        }).then(function () {
-          return { available: true, registered: eligible.length };
+      var existingIds = new Set((registered || []).map(function (script) { return script.id; }).filter(function (id) { return id.indexOf(REGISTERED_PREFIX) === 0; }));
+      var eligible = scripts.filter(validStoredScript);
+      var desired = eligible.map(buildRegistration);
+      var desiredIds = new Set(desired.map(function (script) { return script.id; }));
+      var removeIds = Array.from(existingIds).filter(function (id) { return !desiredIds.has(id); });
+      var updateScripts = desired.filter(function (script) { return existingIds.has(script.id); });
+      var newScripts = desired.filter(function (script) { return !existingIds.has(script.id); });
+      return Promise.all(eligible.map(function (script) { return prepareWorld(script.id); })).then(function () {
+        return removeIds.length ? chrome.userScripts.unregister({ ids: removeIds }) : undefined;
+      }).then(function () {
+        if (!updateScripts.length) return;
+        if (typeof chrome.userScripts.update === "function") return chrome.userScripts.update(updateScripts);
+        return chrome.userScripts.unregister({ ids: updateScripts.map(function (script) { return script.id; }) }).then(function () {
+          return chrome.userScripts.register(updateScripts);
         });
+      }).then(function () {
+        return newScripts.length ? chrome.userScripts.register(newScripts) : undefined;
+      }).then(function () {
+        return { available: true, registered: eligible.length };
       });
     });
+  }
+
+  function sync(scripts) {
+    var snapshot = JSON.parse(JSON.stringify(Array.isArray(scripts) ? scripts : []));
+    var result = syncQueue.then(function () { return syncNow(snapshot); }, function () { return syncNow(snapshot); });
+    syncQueue = result.then(function () {}, function () {});
+    return result;
   }
 
   function execute(scriptId, code, tabId) {

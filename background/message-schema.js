@@ -49,7 +49,7 @@
     if (error) return error;
     if (!isObject(payload.command)) return "Control command must be an object.";
     var command = payload.command;
-    var types = ["SET_RATE", "STEP_UP", "STEP_DOWN", "RESET", "SET_MUTED", "TOGGLE_MUTED", "SET_VOLUME", "ENABLE_AUTOPLAY", "DISABLE_AUTOPLAY", "GET_STATUS", "EXTRACT_PAGE_TEXT"];
+    var types = ["SET_RATE", "STEP_UP", "STEP_DOWN", "RESET", "SET_MUTED", "TOGGLE_MUTED", "SET_VOLUME", "ENABLE_AUTOPLAY", "DISABLE_AUTOPLAY", "LOCK_STATE", "STOP_LOCK", "PLAY", "PAUSE", "GET_MEDIA_LIST", "GET_STATUS", "EXTRACT_PAGE_TEXT"];
     if (types.indexOf(command.type) < 0) return "Unsupported control command.";
     if (command.type === "SET_RATE" && (!isFiniteNumber(command.rate) || command.rate < 0.25 || command.rate > 16)) return "Playback rate is invalid.";
     if (command.type === "SET_VOLUME" && (!isFiniteNumber(command.volume) || command.volume < 0 || command.volume > 1)) return "Volume is invalid.";
@@ -122,6 +122,51 @@
     return typeof value === "string" && value.trim().length >= 1 && value.trim().length <= 40 && !/[\u0000-\u001f\u007f]/.test(value);
   }
 
+  function validSdkScriptId(value) {
+    return typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value) && ["__proto__", "prototype", "constructor"].indexOf(value) < 0;
+  }
+
+  function validSdkSessionToken(value) {
+    return typeof value === "string" && /^wsb_rt_[a-f0-9]{64}$/.test(value);
+  }
+
+  function validSdkContextNonce(value) {
+    return typeof value === "string" && /^wsb_ctx_[a-f0-9]{64}$/.test(value);
+  }
+
+  function validateSdkCapabilities(capabilities) {
+    return Array.isArray(capabilities) && capabilities.length > 0 && capabilities.length <= 6 && !capabilities.some(function (capability) {
+      return !global.WinSpeedBallSdkContracts.validCapability(capability);
+    });
+  }
+
+  function validatePrepareSdkContext(payload) {
+    var error = checkKeys(payload, ["capabilities"], ["capabilities"]);
+    if (error) return error;
+    return validateSdkCapabilities(payload.capabilities) ? "" : "SDK capabilities are invalid.";
+  }
+
+  function validatePrepareSdkSession(payload) {
+    var error = checkKeys(payload, ["scriptId", "code", "capabilities", "contextNonce", "confirmed"], ["scriptId", "code", "capabilities", "contextNonce", "confirmed"]);
+    if (error) return error;
+    if (!validSdkScriptId(payload.scriptId)) return "SDK script ID is invalid.";
+    if (!validSdkContextNonce(payload.contextNonce)) return "SDK context confirmation is invalid.";
+    if (typeof payload.code !== "string" || !payload.code.trim() || payload.code.length > MAX_SCRIPT_LENGTH) return "SDK script code is invalid or too large.";
+    if (!validateSdkCapabilities(payload.capabilities)) return "SDK capabilities are invalid.";
+    return payload.confirmed === true ? "" : "SDK capabilities must be explicitly confirmed.";
+  }
+
+  function validateInvokeSdkSession(payload) {
+    var error = checkKeys(payload, ["sessionToken", "request"], ["sessionToken", "request"]);
+    if (error) return error;
+    if (!validSdkSessionToken(payload.sessionToken)) return "SDK session token is invalid.";
+    if (!isObject(payload.request)) return "SDK request is invalid.";
+    error = checkKeys(payload.request, ["channel", "protocolVersion", "scriptId", "requestId", "method", "args"], ["channel", "protocolVersion", "scriptId", "requestId", "method", "args"]);
+    if (error) return error;
+    var parsed = global.WinSpeedBallSdkContracts.validateRequest(payload.request);
+    return parsed.ok ? "" : parsed.error || "SDK request is invalid.";
+  }
+
   function validateRegister(payload) {
     var error = checkKeys(payload, ["username", "password", "displayName"], ["username", "password"]);
     if (error) return error;
@@ -161,6 +206,46 @@
       return payload.accepted === true ? "" : "Declaration must be explicitly accepted.";
     } },
     getUserSession: { sources: ["popup"], validate: noPayload },
+    getSubscription: { sources: ["popup"], validate: noPayload },
+    getFeatureGates: { sources: ["popup"], validate: noPayload },
+    canUseFeature: { sources: ["popup"], validate: function (payload) {
+      var error = checkKeys(payload, ["feature"], ["feature"]);
+      if (error) return error;
+      return typeof payload.feature === "string" && /^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)+$/.test(payload.feature) && payload.feature.length <= 64
+        ? ""
+        : "Feature ID is invalid.";
+    } },
+    getPrivacySummary: { sources: ["popup"], validate: noPayload },
+    clearPrivacyData: { sources: ["popup"], validate: function (payload) {
+      var error = checkKeys(payload, ["category", "confirmed"], ["category", "confirmed"]);
+      if (error) return error;
+      if (["screenshots", "ocr", "ai", "logs", "scripts", "account", "all"].indexOf(payload.category) < 0) return "Privacy category is invalid.";
+      return payload.confirmed === true ? "" : "Privacy data clearing must be explicitly confirmed.";
+    } },
+    getDeveloperMode: { sources: ["popup"], validate: noPayload },
+    setDeveloperMode: { sources: ["popup"], validate: function (payload) {
+      var error = checkKeys(payload, ["enabled", "confirmed"], ["enabled", "confirmed"]);
+      if (error) return error;
+      if (typeof payload.enabled !== "boolean" || typeof payload.confirmed !== "boolean") return "Developer Mode state is invalid.";
+      return payload.enabled && payload.confirmed !== true ? "Developer Mode must be explicitly confirmed." : "";
+    } },
+    prepareSdkContext: { sources: ["popup"], validate: validatePrepareSdkContext },
+    prepareSdkSession: { sources: ["popup"], validate: validatePrepareSdkSession },
+    invokeSdkSession: { sources: ["popup"], validate: validateInvokeSdkSession },
+    getSdkSessionStatus: { sources: ["popup"], validate: function (payload) {
+      var error = checkKeys(payload, ["sessionToken"], ["sessionToken"]);
+      return error || (validSdkSessionToken(payload.sessionToken) ? "" : "SDK session token is invalid.");
+    } },
+    closeSdkSession: { sources: ["popup"], validate: function (payload) {
+      var error = checkKeys(payload, ["sessionToken"], ["sessionToken"]);
+      return error || (validSdkSessionToken(payload.sessionToken) ? "" : "SDK session token is invalid.");
+    } },
+    deleteSdkScriptData: { sources: ["popup"], validate: function (payload) {
+      var error = checkKeys(payload, ["scriptId", "confirmed"], ["scriptId", "confirmed"]);
+      if (error) return error;
+      if (!validSdkScriptId(payload.scriptId)) return "SDK script ID is invalid.";
+      return payload.confirmed === true ? "" : "SDK script deletion must be explicitly confirmed.";
+    } },
     openPinnedWindow: { sources: ["popup"], validate: noPayload },
     registerUser: { sources: ["popup"], validate: validateRegister },
     loginUser: { sources: ["popup"], validate: validateLogin },
@@ -190,7 +275,7 @@
       if (error) return error;
       if (typeof payload.scriptId !== "string" || !/^[a-zA-Z0-9_-]{1,64}$/.test(payload.scriptId)) return "User script ID is invalid.";
       if (typeof payload.code !== "string" || payload.code.length > MAX_SCRIPT_LENGTH) return "User script is invalid or too large.";
-      if (!Array.isArray(payload.permissions) || !payload.permissions.length || payload.permissions.some(function (permission) { return ["dom", "network"].indexOf(permission) < 0; })) return "User script permissions are invalid.";
+      if (!Array.isArray(payload.permissions) || !payload.permissions.length || payload.permissions.some(function (permission) { return ["dom", "network", "automation"].indexOf(permission) < 0; })) return "User script permissions are invalid.";
       return payload.permissionConfirmed === true ? "" : "User script permissions are not confirmed.";
     } },
     getUserScriptsStatus: { sources: ["popup"], validate: noPayload },

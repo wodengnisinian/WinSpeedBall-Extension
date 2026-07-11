@@ -125,6 +125,31 @@
     });
   }
 
+  function deleteCaptureRecord() {
+    return openCaptureDb().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var transaction = db.transaction(CAPTURE_STORE_NAME, "readwrite");
+        transaction.objectStore(CAPTURE_STORE_NAME).delete(CAPTURE_RECORD_ID);
+        transaction.oncomplete = function () {
+          db.close();
+          remove(["manualCaptureDataUrl", "manualCaptureTime"], function (result) {
+            if (result && result.ok === false) {
+              reject(new Error(result.error || "Could not delete legacy capture."));
+              return;
+            }
+            resolve();
+          });
+        };
+        transaction.onerror = function () {
+          var error = transaction.error;
+          db.close();
+          reject(error || new Error("Could not delete capture."));
+        };
+        transaction.onabort = transaction.onerror;
+      });
+    });
+  }
+
   function getLatestCapture() {
     return getCaptureRecord().then(function (record) {
       if (record && record.dataUrl) return record;
@@ -157,6 +182,7 @@
     appendLog: appendLog,
     restrictAccess: restrictAccess,
     saveCaptureRecord: saveCaptureRecord,
-    getLatestCapture: getLatestCapture
+    getLatestCapture: getLatestCapture,
+    deleteCaptureRecord: deleteCaptureRecord
   };
 })(self);

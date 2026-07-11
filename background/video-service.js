@@ -33,8 +33,9 @@
       var specialPlayerType = "";
       var reason = "";
       var mediaInfo = null;
+      var media = [];
 
-      (results || []).forEach(function (item) {
+      (results || []).forEach(function (item, frameIndex) {
         var result = item && item.result ? item.result : item;
         if (!result) result = { ok: false, error: "no result", mediaCount: 0, applied: 0 };
         frameResults.push(result);
@@ -47,6 +48,23 @@
           specialPlayerType = result.specialPlayerType || specialPlayerType;
           reason = result.reason || reason;
         }
+        (Array.isArray(result.media) ? result.media : []).forEach(function (snapshot) {
+          var frameId = item && item.frameId != null ? item.frameId : frameIndex;
+          snapshot = snapshot || {};
+          media.push({
+            id: "frame-" + String(frameId) + "-" + String(snapshot.id || "media"),
+            frameId: frameId,
+            title: String(snapshot.title || "").slice(0, 256),
+            duration: Number(snapshot.duration || 0),
+            currentTime: Number(snapshot.currentTime || 0),
+            progress: Number(snapshot.progress || 0),
+            rate: Number(snapshot.rate || 1),
+            volume: Number(snapshot.volume || 0),
+            muted: snapshot.muted === true,
+            paused: snapshot.paused !== false,
+            mediaType: String(snapshot.mediaType || "")
+          });
+        });
       });
 
       if (firstOk && command && command.type !== "GET_STATUS" && command.type !== "EXTRACT_PAGE_TEXT") {
@@ -62,6 +80,7 @@
         muted: firstOk ? firstOk.muted : currentMuted,
         volume: firstOk ? firstOk.volume : currentVolume,
         keepPlaying: firstOk ? !!firstOk.keepPlaying : false,
+        controlMode: firstOk ? firstOk.controlMode || "stopped" : "stopped",
         playerAdapter: mediaInfo ? mediaInfo.playerAdapter || "" : firstOk ? firstOk.playerAdapter || "" : "",
         playerType: mediaInfo ? mediaInfo.playerType || "" : firstOk ? firstOk.playerType || "" : "",
         duration: mediaInfo ? mediaInfo.duration || 0 : 0,
@@ -74,6 +93,7 @@
         frameCount: results ? results.length : 0,
         frameResults: frameResults
       };
+      output.media = media;
       if (!firstOk) output.error = "No controllable media was found on this page.";
       if (specialPlayerDetected) {
         output.specialPlayerDetected = true;
@@ -89,7 +109,7 @@
           target: { tabId: tabId, allFrames: true },
           world: "ISOLATED",
           func: function (cmd) {
-            if (window.__WinSpeedBallLoadedVersion === "2026-07-11-player-adapters-v1" && window.winSpeedBall && window.winSpeedBall.handleCommand) {
+            if (window.__WinSpeedBallLoadedVersion === "2026-07-11-sdk-lifecycle-v2" && window.winSpeedBall && window.winSpeedBall.handleCommand) {
               return window.winSpeedBall.handleCommand(cmd);
             }
             return { ok: false, error: "content script not loaded", url: location.href, mediaCount: 0, applied: 0 };

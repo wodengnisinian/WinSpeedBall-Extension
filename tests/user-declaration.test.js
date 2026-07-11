@@ -70,6 +70,7 @@ function buildServices(initialLocal) {
   vm.runInContext(fs.readFileSync(path.join(root, "background/declaration-service.js"), "utf8"), context);
   context.self.WinSpeedBallDeclarationService = context.self.WinSpeedBallDeclarationService;
   vm.runInContext(fs.readFileSync(path.join(root, "background/user-service.js"), "utf8"), context);
+  vm.runInContext(fs.readFileSync(path.join(root, "background/user-provider.js"), "utf8"), context);
   return {
     declaration: context.self.WinSpeedBallDeclarationService,
     users: context.self.WinSpeedBallUserService,

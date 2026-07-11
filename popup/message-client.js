@@ -52,14 +52,19 @@
     if (!site || !site.ok) return Promise.resolve(site || { ok: false, error: "当前页面不支持网站授权。" });
     if (site.granted) return Promise.resolve(site);
     return new Promise(function (resolve) {
-      chrome.permissions.request({ origins: [site.originPattern] }, function (granted) {
-        var error = chrome.runtime.lastError && chrome.runtime.lastError.message;
-        if (!granted || error) {
-          resolve({ ok: false, error: error || "用户未授权当前网站。" });
-          return;
-        }
-        site.granted = true;
-        resolve(site);
+      chrome.permissions.contains({ origins: [site.originPattern] }, function (contains) {
+        var containsError = chrome.runtime.lastError && chrome.runtime.lastError.message;
+        if (containsError) { resolve({ ok: false, error: containsError }); return; }
+        if (contains) { site.granted = true; resolve(site); return; }
+        chrome.permissions.request({ origins: [site.originPattern] }, function (granted) {
+          var error = chrome.runtime.lastError && chrome.runtime.lastError.message;
+          if (!granted || error) {
+            resolve({ ok: false, error: error || "用户未授权当前网站。" });
+            return;
+          }
+          site.granted = true;
+          resolve(site);
+        });
       });
     });
   }
