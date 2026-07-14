@@ -1,0 +1,47 @@
+﻿<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>WinSpeedBall 测试 - iframe video</title>
+<style>
+  body { font-family:"Segoe UI","Microsoft YaHei",sans-serif; max-width:780px; margin:40px auto; background:#0D1117; color:#C9D1D9; padding:20px; }
+  h1 { color:#58A6FF; }
+  .info { background:#161B22; border:1px solid #30363D; border-radius:6px; padding:12px; margin:16px 0; font-size:13px; }
+  .info strong { color:#7EE787; }
+  iframe { width:100%; height:400px; border:1px solid #30363D; border-radius:8px; margin:16px 0; }
+</style>
+</head>
+<body>
+<h1>测试页：iframe video</h1>
+<div class="info">
+  <strong>说明：</strong>此页面的 video 元素在 iframe 内。扩展需要穿透 iframe 才能检测和控制。<br>
+  <strong>注意：</strong>由于沙盒限制，跨域 iframe 可能无法被 content_script 检测到。<br>
+  此处使用一个内置的 iframe 来测试同域场景。
+</div>
+
+<div class="info">
+  下方 iframe 包含一个 video 元素
+</div>
+<iframe id="testFrame" src="about:blank"></iframe>
+
+<div class="info">
+  <strong>测试步骤：</strong><br>
+  1. 打开扩展 popup，点击「检测」查看媒体数量。<br>
+  2. 如果 frame 数量包含 iframe，且检测到媒体，说明 iframe 穿透成功。<br>
+  3. 点击倍速按钮测试控制效果。
+</div>
+
+<script>
+  var frame = document.getElementById("testFrame");
+  var doc = frame.contentDocument || frame.contentWindow.document;
+  doc.open();
+  doc.write('<!DOCTYPE html><html><head><style>body{font-family:sans-serif;background:#161B22;color:#C9D1D9;padding:12px;}</style></head><body>');
+  doc.write('<h3>iframe 内的 Video</h3>');
+  doc.write('<video controls width="600"><source src="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4" type="video/mp4"></video>');
+  doc.write('</body></html>');
+  doc.close();
+  console.log("[Test] iframe 内容已写入");
+</script>
+
+</body>
+</html>
