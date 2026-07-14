@@ -74,6 +74,8 @@ test("用户脚本同步按差异更新，不再全部注销", async () => {
   assert.deepEqual(fixture.calls.update, [["wsb-user-one"]]);
   assert.deepEqual(fixture.calls.register, [["wsb-user-two"]]);
   assert.deepEqual(Array.from(fixture.registry.keys()).sort(), ["wsb-user-one", "wsb-user-two"]);
+  assert.equal(fixture.calls.configure.length, 2);
+  assert.equal(fixture.calls.configure.every((item) => item.messaging === true), true);
 });
 
 test("并发用户脚本同步被串行化且最终状态采用最后请求", async () => {
@@ -84,4 +86,21 @@ test("并发用户脚本同步被串行化且最终状态采用最后请求", as
   await Promise.all([first, second, third]);
   assert.equal(fixture.getMaxActiveMutations(), 1);
   assert.deepEqual(Array.from(fixture.registry.keys()), ["wsb-user-three"]);
+});
+
+test("声明 video.read 的普通用户脚本可以调用公开 WSB.video.getStatus", async () => {
+  const fixture = buildService();
+  const code = [
+    "// ==UserScript==",
+    "// @wsb-capability video.read",
+    "// ==/UserScript==",
+    "WSB.video.getStatus();"
+  ].join("\n");
+  await fixture.service.sync([storedScript("video-status", code)]);
+  const registered = fixture.registry.get("wsb-user-video-status");
+  assert.ok(registered);
+  assert.match(registered.js[0].code, /var WSB=Object\.freeze/);
+  assert.match(registered.js[0].code, /getStatus:function\(\)/);
+  assert.match(registered.js[0].code, /WSB_USER_SCRIPT_BRIDGE/);
+  assert.equal(fixture.calls.configure[0].messaging, true);
 });

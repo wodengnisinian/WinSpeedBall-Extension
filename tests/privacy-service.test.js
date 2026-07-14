@@ -106,6 +106,8 @@ test("脚本清理会同时删除 Developer 草稿和工作区缓存", async () 
   fixture.localData.lastWorkspaceScript = { code: "legacy cache" };
   fixture.localData.scriptWorkspaceActive = true;
   fixture.localData.popupState = { lastPanelId: "scriptPanel", scriptWorkspaceActive: true, lastWorkspaceScript: { code: "popup cache" } };
+  fixture.localData.popupStateBrowser = { lastPanelId: "aiPanel", scriptWorkspaceActive: false, lastWorkspaceScript: { code: "browser cache" } };
+  fixture.localData.popupStatePinned = { lastPanelId: "scriptPanel", scriptWorkspaceActive: true, lastWorkspaceScript: { code: "pinned cache" } };
   const before = await fixture.service.getSummary();
   assert.equal(before.categories.find((item) => item.id === "scripts").count, 3);
   const result = await fixture.service.clear("scripts");
@@ -124,6 +126,10 @@ test("脚本清理会同时删除 Developer 草稿和工作区缓存", async () 
   assert.equal(fixture.localData.popupState.lastPanelId, "scriptPanel");
   assert.equal(fixture.localData.popupState.scriptWorkspaceActive, false);
   assert.equal(fixture.localData.popupState.lastWorkspaceScript, undefined);
+  assert.equal(fixture.localData.popupStateBrowser.lastPanelId, "aiPanel");
+  assert.equal(fixture.localData.popupStateBrowser.lastWorkspaceScript, undefined);
+  assert.equal(fixture.localData.popupStatePinned.scriptWorkspaceActive, false);
+  assert.equal(fixture.localData.popupStatePinned.lastWorkspaceScript, undefined);
 });
 
 test("全部清理会删除六类数据并退出本地账户", async () => {

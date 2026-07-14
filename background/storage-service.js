@@ -4,6 +4,7 @@
   var CAPTURE_DB_NAME = "winspeedball-captures";
   var CAPTURE_STORE_NAME = "captures";
   var CAPTURE_RECORD_ID = "latest";
+  var logMutationQueue = Promise.resolve();
 
   function lastErrorMessage() {
     return chrome.runtime.lastError ? chrome.runtime.lastError.message : "";
@@ -44,18 +45,34 @@
     }
   }
 
-  function appendLog(category, message, details) {
-    get(["popupLogs"], function (data) {
-      var suffix = [];
-      Object.keys(details || {}).forEach(function (key) {
-        var value = String(details[key] == null ? "" : details[key]).replace(/\s+/g, " ").trim().slice(0, 180);
-        if (value) suffix.push(key + "=" + value);
+  function mutateLogs(mutator) {
+    var operation = logMutationQueue.then(function () {
+      return new Promise(function (resolve) {
+        get(["popupLogs"], function (data) {
+          var current = global.WinSpeedBallLogRecord.normalizeList(Array.isArray(data.popupLogs) ? data.popupLogs : [], 500);
+          var next = global.WinSpeedBallLogRecord.normalizeList(mutator(current) || [], 500);
+          set({ popupLogs: next }, function (result) {
+            resolve(result && result.ok === false ? result : { ok: true, logs: next });
+          });
+        });
       });
-      var entry = "[" + new Date().toLocaleTimeString() + "] [" + category + "] " + message + (suffix.length ? " | " + suffix.join(" | ") : "");
-      var logs = Array.isArray(data.popupLogs) ? data.popupLogs : [];
-      logs.unshift(entry);
-      set({ popupLogs: logs.slice(0, 300) });
     });
+    logMutationQueue = operation.then(function () {}, function () {});
+    return operation;
+  }
+
+  function appendLogRecord(record) {
+    var entry = global.WinSpeedBallLogRecord.normalize(record);
+    if (!entry) return Promise.resolve({ ok: false, error: "Log record is invalid." });
+    return mutateLogs(function (logs) { return [entry].concat(logs); });
+  }
+
+  function appendLog(category, message, details, level) {
+    return appendLogRecord(global.WinSpeedBallLogRecord.create(category, message, details, level));
+  }
+
+  function clearLogs() {
+    return mutateLogs(function () { return []; });
   }
 
   function restrictAccess() {
@@ -180,6 +197,8 @@
     set: set,
     remove: remove,
     appendLog: appendLog,
+    appendLogRecord: appendLogRecord,
+    clearLogs: clearLogs,
     restrictAccess: restrictAccess,
     saveCaptureRecord: saveCaptureRecord,
     getLatestCapture: getLatestCapture,

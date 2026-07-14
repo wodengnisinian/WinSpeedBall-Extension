@@ -25,7 +25,7 @@ function buildService(options = {}) {
     },
     set(value, callback) { Object.assign(data, value); if (callback) callback({ ok: true }); },
     appendLog() {},
-    getLatestCapture() { return Promise.resolve(null); }
+    getLatestCapture() { return Promise.resolve(options.capture || null); }
   };
   const chrome = {
     runtime: {
@@ -131,4 +131,14 @@ test("OCR 与 AI 自动回写都校验当前截图和取消标记", () => {
   assert.match(ocrSource, /ocrCancelledSourceTime/);
   assert.match(aiSource, /manualCaptureTime/);
   assert.match(aiSource, /ocrCancelledSourceTime/);
+});
+
+test("OCR 重试统一复用后台离屏任务", async () => {
+  const fixture = buildService({ capture: { sourceTime: 100, dataUrl: "data:image/png;base64,AA==" } });
+  fixture.data.ocrJobStatus = "failed";
+  const result = await fixture.service.restartLatest();
+  assert.equal(result.ok, true);
+  assert.equal(result.restarted, true);
+  assert.match(fixture.data.ocrJobStatus, /^(queued|recognizing)$/);
+  assert.equal(fixture.data.ocrCancelledSourceTime, 0);
 });

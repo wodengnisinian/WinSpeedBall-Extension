@@ -1,3 +1,4 @@
+importScripts("shared/log-record.js");
 importScripts("background/storage-service.js");
 importScripts("background/declaration-service.js");
 importScripts("background/user-service.js");
@@ -12,6 +13,7 @@ importScripts("background/sdk-context-service.js");
 importScripts("background/developer-mode-service.js");
 importScripts("background/privacy-service.js");
 importScripts("background/window-service.js");
+importScripts("background/ai-window-service.js");
 importScripts("background/ai-providers.js");
 importScripts("background/ai-service.js");
 importScripts("background/ocr-service.js");
@@ -20,6 +22,7 @@ importScripts("background/sdk-service.js");
 importScripts("background/message-schema.js");
 importScripts("background/message-router.js");
 importScripts("background/user-script-service.js");
+importScripts("background/user-script-bridge.js");
 
 /**
  * WinSpeedBall background service worker.
@@ -34,6 +37,8 @@ importScripts("background/user-script-service.js");
   var SDK_SESSIONS_KEY = "sdkRuntimeSessions";
   var SDK_CONTEXT_INTENTS_KEY = "sdkContextIntents";
   var CAPTURE_AUTH_KEY = "pendingCaptureAuthorization";
+  var AI_REPLY_KEY = "aiReplyWindowPayload";
+  var AI_REPLY_BOUNDS = { width: 280, height: 180 };
   var pendingCapture = null;
   var lastAccessibleTab = null;
   var DOUYIN_ALARM = "douyin-panel-auto-next";
@@ -55,6 +60,7 @@ importScripts("background/user-script-service.js");
   var developerModeService = self.WinSpeedBallDeveloperModeService;
   var privacyService = self.WinSpeedBallPrivacyService;
   var windowService = self.WinSpeedBallWindowService;
+  var aiWindowService = self.WinSpeedBallAiWindowService.create({ storageKey: AI_REPLY_KEY, bounds: AI_REPLY_BOUNDS });
   var callAi = self.WinSpeedBallAiService.call;
   var saveAiSettings = self.WinSpeedBallAiService.saveSettings;
   var ocrService = self.WinSpeedBallOcrService;
@@ -65,8 +71,30 @@ importScripts("background/user-script-service.js");
   var cancelOcrJob = ocrService.cancel;
   var getManualCapture = ocrService.getManualCapture;
   var resumePendingOcrJob = ocrService.resume;
+  var restartLatestOcrJob = ocrService.restartLatest;
   var isOcrWorkerSender = ocrService.isWorkerSender;
   var videoService = self.WinSpeedBallVideoService.create();
+  var userScriptBridge = self.WinSpeedBallUserScriptBridge.create({
+    runtime: chrome.runtime,
+    controlTab: function (tabId, command, callback) { videoService.controlTab(tabId, command, callback); },
+    canUseFeature: function (featureId) { return featureGate.check(featureId); },
+    onAudit: function (result) {
+      appendBackgroundLog("脚本", result && result.ok ? "读取插件视频状态成功" : "读取插件视频状态失败", {
+        总时长: result && result.duration || 0,
+        当前时间: result && result.currentTime || 0,
+        媒体数量: result && result.mediaCount || 0,
+        原因: result && result.error || "-"
+      }, result && result.ok ? "success" : "warn");
+      try {
+        var shared = chrome.runtime.sendMessage({
+          source: "user-script-bridge",
+          type: "WSB_SHARED_VIDEO_STATUS",
+          status: result || { ok: false, duration: 0, currentTime: 0, mediaCount: 0 }
+        });
+        if (shared && typeof shared.catch === "function") shared.catch(function () {});
+      } catch (error) {}
+    }
+  });
   var sdkContextService = self.WinSpeedBallSdkContextService.create({
     contracts: self.WinSpeedBallSdkContracts,
     resolveCurrent: resolveSdkContext,
@@ -231,7 +259,8 @@ importScripts("background/user-script-service.js");
     });
   }
 
-  function syncRegisteredUserScripts() {
+  function syncRegisteredUserScripts(reason) {
+    reason = String(reason || "系统同步");
     return Promise.all([
       new Promise(function (resolve) {
         storageGet(["userScripts"], function (data) {
@@ -256,9 +285,19 @@ importScripts("background/user-script-service.js");
           return self.WinSpeedBallUserScriptService.sync(scripts);
         });
       });
+    }).then(function (result) {
+      appendBackgroundLog("脚本", "同步用户脚本成功", {
+        触发原因: reason,
+        已注册: result && result.registered || 0,
+        功能可用: result && result.available ? "是" : "否"
+      }, "success");
+      return result;
     }).catch(function (error) {
       var message = error && error.message || String(error || "unknown");
-      if (!error || error.code !== "USER_SCRIPTS_DISABLED") appendBackgroundLog("脚本", "同步用户脚本失败", { 原因: message });
+      appendBackgroundLog("脚本", error && error.code === "USER_SCRIPTS_DISABLED" ? "用户脚本功能不可用" : "同步用户脚本失败", {
+        触发原因: reason,
+        原因: message
+      }, error && error.code === "USER_SCRIPTS_DISABLED" ? "warn" : "error");
       return { available: false, registered: 0, error: message, code: error && error.code || "USER_SCRIPT_SYNC_FAILED" };
     });
   }
@@ -592,6 +631,12 @@ importScripts("background/user-script-service.js");
       });
     });
   }
+
+  function showAiReplyWindow(req, callback) {
+    return aiWindowService.show(req || {}, callback);
+  }
+
+  self.WinSpeedBallShowAiReplyWindow = showAiReplyWindow;
 
   function saveManualCapture(req, sender, callback) {
     validateCaptureAuthorization(req, sender).then(function (authorization) {
@@ -986,7 +1031,12 @@ importScripts("background/user-script-service.js");
 
   chrome.commands.onCommand.addListener(function (command) {
     if (command === "region-capture") {
-      startRegionCapture(function () {});
+      startRegionCapture(function (result) {
+        appendBackgroundLog("截图", result && result.ok ? "快捷键框选已启动" : "快捷键框选启动失败", {
+          命令: command,
+          原因: result && result.error || "-"
+        }, result && result.ok ? "success" : "error");
+      });
     }
   });
 
@@ -1007,6 +1057,11 @@ importScripts("background/user-script-service.js");
       if (!alarm) return;
       if (alarm.name === DOUYIN_ALARM && douyinState.running) {
         runDouyinNext(function (res) {
+          appendBackgroundLog("自动化", res && res.ok ? "自动下一条执行成功" : "自动下一条执行失败", {
+            间隔: douyinState.interval + "s",
+            页面响应: res && res.result || "-",
+            原因: res && res.error || "-"
+          }, res && res.ok ? "success" : "error");
           if (!res || !res.ok) {
             douyinState.running = false;
             saveDouyinState(scheduleDouyinAlarm);
@@ -1014,6 +1069,12 @@ importScripts("background/user-script-service.js");
         });
       } else if (alarm.name === BOOK_ALARM && bookState.running) {
         runBookTurn("NEXT", bookState.tabId, bookState.originPattern, function (res) {
+          appendBackgroundLog("图书", res && res.ok ? "自动翻页执行成功" : "自动翻页执行失败", {
+            方向: "下一页",
+            间隔: bookState.interval + "s",
+            方式: res && res.method || "-",
+            原因: res && res.error || "-"
+          }, res && res.ok ? "success" : "error");
           if (!res || !res.ok) {
             bookState.running = false;
             bookState.tabId = null;
@@ -1079,7 +1140,7 @@ importScripts("background/user-script-service.js");
     }).then(function (result) {
       if (stopsScripts) notifySdkSessionsRevoked("privacy-clear");
       if (!stopsScripts) return result;
-      return syncRegisteredUserScripts().then(function () { return result; });
+      return syncRegisteredUserScripts("隐私数据清理").then(function () { return result; });
     });
   }
 
@@ -1123,6 +1184,13 @@ importScripts("background/user-script-service.js");
     getManualCapture: function (request, sender, respond) {
       return gateAction("ocr.basic", function () { getManualCapture(respond); }, respond);
     },
+    retryManualOcr: function (request, sender, respond) {
+      return gateAction("ocr.basic", function () {
+        restartLatestOcrJob().then(respond).catch(function (error) {
+          respond({ ok: false, error: error && error.message || String(error || "Could not restart OCR.") });
+        });
+      }, respond);
+    },
     getUsageDeclaration: function () { return declarationService.get(); },
     acceptUsageDeclaration: function (request) {
       return userService.getSession().then(function (session) {
@@ -1145,6 +1213,8 @@ importScripts("background/user-script-service.js");
     getSdkSessionStatus: function (request) { return sdkService.getSessionStatus(request.sessionToken); },
     closeSdkSession: function (request) { return sdkService.closeSession(request.sessionToken); },
     deleteSdkScriptData: function (request) { return sdkService.deleteScriptLifecycle(request.scriptId); },
+    appendPopupLog: function (request) { return self.WinSpeedBallStorageService.appendLogRecord(request.record); },
+    clearPopupLogs: function () { return self.WinSpeedBallStorageService.clearLogs(); },
     getPrivacySummary: function () { return privacyService.getSummary(); },
     clearPrivacyData: function (request) { return clearPrivacyData(request); },
     openPinnedWindow: function () { return windowService.openPinnedWindow(); },
@@ -1158,43 +1228,63 @@ importScripts("background/user-script-service.js");
     saveApiKey: function (request, sender, respond) { saveAiSettings(request, respond); },
     getSettings: function (request, sender, respond) { getSettings(respond); },
     getActiveSiteAccess: function (request, sender, respond) { getActiveSiteAccess(respond); },
+    showAiReplyWindow: function (request, sender, respond) { showAiReplyWindow(request, respond); },
     executeUserScript: function (request, sender, respond) { executeUserScript(request, respond); },
     getUserScriptsStatus: function (request, sender, respond) { getUserScriptsStatus(respond); },
     douyinPanel: function (request, sender, respond) { handleDouyinPanel(request, respond); },
     bookPanel: function (request, sender, respond) { handleBookPanel(request, respond); },
-    syncUserScripts: function () { return syncRegisteredUserScripts(); },
+    syncUserScripts: function () { return syncRegisteredUserScripts("手动同步"); },
     testAI: function (request, sender, respond) {
       return gateAction("ai.basic", function () { callAi({ prompt: "Please reply: connection ok" }, respond); }, respond);
     },
     askAI: function (request, sender, respond, message) {
-      return gateAction("ai.basic", function () { callAi(message.payload, respond); }, respond);
+      return gateAction("ai.basic", function () {
+        callAi(message.payload, function (result) {
+          if (result && result.ok) showAiReplyWindow({ content: result.content }, function () {});
+          respond(result);
+        });
+      }, respond);
     },
     testDeepSeek: function (request, sender, respond) {
       return gateAction("ai.basic", function () { callAi({ prompt: "Please reply: connection ok" }, respond); }, respond);
     },
     askDeepSeek: function (request, sender, respond, message) {
-      return gateAction("ai.basic", function () { callAi(message.payload, respond); }, respond);
+      return gateAction("ai.basic", function () {
+        callAi(message.payload, function (result) {
+          if (result && result.ok) showAiReplyWindow({ content: result.content }, function () {});
+          respond(result);
+        });
+      }, respond);
     }
   });
 
   try {
-    chrome.permissions.onAdded.addListener(function () {
-      syncRegisteredUserScripts();
+    chrome.permissions.onAdded.addListener(function (permissions) {
+      var added = permissions && permissions.origins || [];
+      appendBackgroundLog("权限", "网站权限已新增", { 数量: added.length }, "success");
+      syncRegisteredUserScripts("网站权限新增");
     });
     chrome.permissions.onRemoved.addListener(function (permissions) {
       var removed = permissions && permissions.origins || [];
+      var stoppedTasks = [];
       if (douyinState.originPattern && removed.indexOf(douyinState.originPattern) >= 0) {
         douyinState.running = false;
         douyinState.tabId = null;
         douyinState.originPattern = "";
         saveDouyinState(scheduleDouyinAlarm);
+        stoppedTasks.push("自动下一条");
       }
       if (bookState.originPattern && removed.indexOf(bookState.originPattern) >= 0) {
         bookState.running = false;
         bookState.tabId = null;
         bookState.originPattern = "";
         saveBookState(scheduleBookAlarm);
+        stoppedTasks.push("图书自动翻页");
       }
+      appendBackgroundLog("权限", "网站权限已移除", {
+        数量: removed.length,
+        已停止任务: stoppedTasks.length ? stoppedTasks.join("、") : "无"
+      }, "warn");
       if (removed.length) {
         storageGet(["userScripts"], function (data) {
           var scripts = Array.isArray(data.userScripts) ? data.userScripts : [];
@@ -1210,18 +1300,29 @@ importScripts("background/user-script-service.js");
           if (changed) storageSet({ userScripts: scripts }, function () {});
         });
       }
-      syncRegisteredUserScripts();
+      syncRegisteredUserScripts("网站权限移除");
     });
     chrome.storage.onChanged.addListener(function (changes, areaName) {
-      if (areaName === "local" && changes.userScripts) syncRegisteredUserScripts();
+      if (areaName === "local" && changes.userScripts) syncRegisteredUserScripts("脚本配置变更");
     });
   } catch (e) {}
 
   chrome.runtime.onInstalled.addListener(function (details) {
-    if (details && (details.reason === "install" || details.reason === "update")) syncRegisteredUserScripts();
+    if (details && (details.reason === "install" || details.reason === "update")) syncRegisteredUserScripts("扩展安装或更新");
   });
 
+  chrome.windows.onRemoved.addListener(function (windowId) {
+    aiWindowService.handleRemoved(windowId);
+  });
+
+  chrome.windows.onBoundsChanged.addListener(function (windowInfo) {
+    aiWindowService.handleBoundsChanged(windowInfo);
+  });
+
+  aiWindowService.hydrate();
+
   restrictStorageAccess();
+  userScriptBridge.install();
   videoService.hydrate();
   storageGet(["douyinPanelState"], function (d) {
     if (d.douyinPanelState) {
@@ -1240,6 +1341,6 @@ importScripts("background/user-script-service.js");
     bookState.originPattern = String(d.bookPanelState.originPattern || "");
     scheduleBookAlarm();
   });
-  syncRegisteredUserScripts();
+  syncRegisteredUserScripts("后台启动");
   resumePendingOcrJob();
 })();

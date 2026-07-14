@@ -103,6 +103,22 @@ test("release documentation contains no superseded runtime wording", () => {
   }
 });
 
+test("完整使用说明覆盖普通脚本、SDK 能力和全部公开方法", () => {
+  const guide = read("docs/user-guide-and-script-api.md");
+  [
+    "普通用户脚本编写要求",
+    "Developer SDK 脚本要求",
+    "WSB.video.getStatus()",
+    "WSB.ocr.latest()",
+    "WSB.ai.summary(sourceText)",
+    "WSB.page.text()",
+    "WSB.storage.set(key, value)",
+    "WSB.event.on"
+  ].forEach((text) => assert.match(guide, new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))));
+  assert.match(guide, /SDK_DEPENDENCY_NOT_READY/);
+  assert.match(read("README.md"), /docs\/user-guide-and-script-api\.md/);
+});
+
 test("SDK sandbox permits only Blob-backed workers", () => {
   const manifest = JSON.parse(read("manifest.json"));
   assert.ok(manifest.sandbox.pages.includes("sdk/script-runner.html"));

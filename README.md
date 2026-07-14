@@ -14,15 +14,22 @@
 - 本地用户注册、登录、退出、资料修改、改密和账户删除
 - 首次使用声明、禁止用途说明和版本化确认记录
 - 顶部固定按钮，可将浏览器原生弹窗打开为持续停留的独立小窗口
+- 浏览器主弹窗与独立主窗口均固定为 320×340；独立窗口只记住位置
 - 默认隐藏的 Developer Mode，提供 SDK 文档、多草稿编辑器、受限沙箱运行和真实 API 测试
 - `WSB.video`、`WSB.page`、`WSB.ai`、`WSB.ocr.latest` 与按脚本隔离的 `WSB.storage`
+
+## 完整使用说明与脚本开发
+
+项目功能、安装使用、普通用户脚本要求、Developer SDK 规则、全部 WSB 公开接口、参数限制、返回模型和示例，统一见：
+
+- [`docs/user-guide-and-script-api.md`](docs/user-guide-and-script-api.md)
 
 ## 在 Microsoft Edge 中安装
 
 1. 打开 `edge://extensions/`。
 2. 打开“开发人员模式”。
 3. 点击“加载解压缩的扩展”。
-4. 选择本目录 `WinSpeedBall-Extension`。
+4. 选择本目录 `WinSpeedBall-Extension-publish`。
 5. 修改代码后，需要在扩展管理页面点击“重新加载”。
 
 ## 网站权限
@@ -53,8 +60,9 @@
 2. 如需自动发送，打开“OCR 识别完成后自动发送给 AI”。
 3. 自定义提示词可以留空，也可以使用 `{{OCR}}` 插入本次识别结果。
 4. 点击区域 OCR，回到网页框选内容。
-5. 截图会保存到扩展的 IndexedDB，并由后台隐藏工作页继续识别；弹窗关闭不会中断 OCR。
-6. OCR 和 AI 的当前状态、失败原因可以在日志页面查看。
+5. 截图会保存到扩展的 IndexedDB，并由后台隐藏工作页继续识别；主弹窗不加载 OCR 引擎，关闭弹窗也不会中断识别。
+6. OCR 失败后可以点击“重新识别”，任务仍由同一个后台离屏流程执行。
+7. OCR 和 AI 的当前状态、失败原因可以在日志页面查看。
 
 旧版 DeepSeek 配置会自动迁移。升级后请在设置页点击一次“保存”，让浏览器确认当前 AI 服务地址的访问权限。
 
@@ -96,6 +104,7 @@
 - `background/ai-providers.js`：不同 AI 服务的请求协议、响应解析、超时和安全校验。
 - `background/ai-service.js`：AI Provider 选择、独立配置、旧数据迁移和 OCR 结果关联。
 - `background/ocr-service.js`：离屏 OCR 调度、任务状态、结果处理和自动 AI。
+- `ai_reply.html`、`ai_reply.js`：可复用的独立 AI 回复窗口、复制操作和快捷键。
 - `background/video-service.js`：多 Frame 视频控制、脚本注入和播放状态聚合。
 - `background/message-schema.js`：消息来源与参数校验。
 - `background/message-router.js`：消息分发与统一响应。
@@ -107,7 +116,9 @@
 - `popup/developer-controller.js`：开发者文档、多草稿管理、声明校验和真实 API 测试。
 - `popup/sdk-session-controller.js`：SDK 授权确认、沙箱会话、RPC 转发和停止撤销。
 - `popup.js`：视频、OCR、设置、脚本和导航界面编排。
+
 - `content/player-adapters.js`：HTML5 播放器控制能力与 YouTube、Bilibili 站点识别。
+- `content/media-core-main.js`：页面主环境强控制核心，负责媒体属性锁、动态播放器注册、状态修复和多媒体同步。
 - `content_script.js`：页面媒体注册表、增量 DOM 扫描、区域截图和页面文字提取。
 
 媒体层首次加载时建立一次索引，之后只扫描新加入的 DOM 节点和 Shadow Root。持续控制每秒只检查已注册的媒体元素，并每 30 秒进行一次完整性校准。

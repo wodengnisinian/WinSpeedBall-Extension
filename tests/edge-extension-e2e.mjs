@@ -166,21 +166,59 @@ return probe;`;
     };
   });
   await localPage.goto(`${localOrigin}/course`);
-  await localPage.addScriptTag({ path: path.join(root, "content/player-adapters.js") });
-  await localPage.addScriptTag({ path: path.join(root, "content_script.js") });
+  await localPage.evaluate(() => {
+    const video = document.querySelector("video");
+    window.__courseNativeRateDescriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "playbackRate");
+    video.addEventListener("ratechange", () => {
+      if (window.__courseNativeRateDescriptor.get.call(video) !== 1) {
+        window.__courseNativeRateDescriptor.set.call(video, 1);
+      }
+    });
+  });
+  await localPage.addScriptTag({ path: path.join(root, "shadow_hook.js") });
+  await localPage.addScriptTag({ path: path.join(root, "content/media-core-main.js") });
   const videoProbe = await localPage.evaluate(async () => {
-    const before = window.winSpeedBall.handleCommand({ type: "GET_MEDIA_LIST" });
-    const changed = window.winSpeedBall.handleCommand({ type: "SET_RATE", rate: 2 });
-    const paused = await window.winSpeedBall.handleCommand({ type: "PAUSE" });
-    const lock = window.winSpeedBall.handleCommand({ type: "LOCK_STATE" });
-    window.winSpeedBall.handleCommand({ type: "ENABLE_AUTOPLAY" });
-    const afterAutoplayOff = window.winSpeedBall.handleCommand({ type: "DISABLE_AUTOPLAY" });
-    const stopped = window.winSpeedBall.handleCommand({ type: "STOP_LOCK" });
-    return { before, changed, paused, lock, afterAutoplayOff, stopped };
+    const video = document.querySelector("video");
+    const before = window.WinSpeedBallMediaCore.handleCommand({ type: "GET_MEDIA_LIST" });
+    const changed = window.WinSpeedBallMediaCore.handleCommand({ type: "SET_RATE", rate: 2 });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const resistedRate = video.playbackRate;
+    window.__courseNativeRateDescriptor.set.call(video, 1);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const nativeSetterResisted = window.__courseNativeRateDescriptor.get.call(video);
+    Object.defineProperty(video, "playbackRate", {
+      configurable: false,
+      get() { return 1; },
+      set() {}
+    });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const descriptorRecovered = !Object.prototype.hasOwnProperty.call(video, "playbackRate") && window.__courseNativeRateDescriptor.get.call(video) === 2;
+    const prototypeDescriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "playbackRate");
+    const reflectResult = Reflect.defineProperty(HTMLMediaElement.prototype, "playbackRate", {
+      configurable: true,
+      get() { return 1; },
+      set() {}
+    });
+    const protectedDescriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "playbackRate");
+    const prototypeProtected = reflectResult === true && protectedDescriptor.get === prototypeDescriptor.get && protectedDescriptor.set === prototypeDescriptor.set;
+    const paused = await window.WinSpeedBallMediaCore.handleCommand({ type: "PAUSE" });
+    const lock = window.WinSpeedBallMediaCore.handleCommand({ type: "LOCK_STATE" });
+    window.WinSpeedBallMediaCore.handleCommand({ type: "ENABLE_AUTOPLAY" });
+    const afterAutoplayOff = window.WinSpeedBallMediaCore.handleCommand({ type: "DISABLE_AUTOPLAY" });
+    const stopped = window.WinSpeedBallMediaCore.handleCommand({ type: "STOP_LOCK" });
+    video.playbackRate = 1;
+    const unlockedRate = video.playbackRate;
+    return { before, changed, resistedRate, nativeSetterResisted, descriptorRecovered, prototypeProtected, unlockedRate, paused, lock, afterAutoplayOff, stopped };
   });
   assert.equal(videoProbe.before.media[0].title, "Local lesson");
   assert.equal(Object.prototype.hasOwnProperty.call(videoProbe.before.media[0], "url"), false);
   assert.equal(videoProbe.changed.rate, 2);
+  assert.equal(videoProbe.changed.rateLocked, true);
+  assert.equal(videoProbe.resistedRate, 2);
+  assert.equal(videoProbe.nativeSetterResisted, 2);
+  assert.equal(videoProbe.descriptorRecovered, true);
+  assert.equal(videoProbe.prototypeProtected, true);
+  assert.equal(videoProbe.unlockedRate, 1);
   assert.equal(videoProbe.paused.paused, true);
   assert.equal(videoProbe.lock.controlMode, "lock");
   assert.equal(videoProbe.afterAutoplayOff.controlMode, "lock");

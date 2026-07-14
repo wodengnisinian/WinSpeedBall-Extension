@@ -163,6 +163,123 @@ test("VideoService 聚合稳定媒体 ID、帧和控制模式", () => {
   assert.deepEqual(Array.from(result.media, (item) => item.frameId), [0, 7]);
 });
 
+test("VideoService 将媒体控制发送到页面主环境", () => {
+  const source = fs.readFileSync(path.join(root, "background/video-service.js"), "utf8");
+  assert.match(source, /world:\s*"MAIN"/);
+  assert.match(source, /files:\s*\["shadow_hook\.js",\s*"content\/media-core-main\.js"\]/);
+  assert.match(source, /WinSpeedBallMediaCoreV6\.handleCommand/);
+  assert.match(source, /command\.type === "EXTRACT_PAGE_TEXT"[\s\S]*?sendIsolatedCommandToAllFrames/);
+  assert.match(source, /authoritative = mediaInfo \|\| firstOk/);
+  assert.match(source, /rateLocked:\s*authoritative \? authoritative\.rateLocked === true : false/);
+  assert.match(source, /verifiedAfterMs:\s*700/);
+  assert.match(source, /ok:\s*rateStable/);
+  assert.match(source, /main media core upgrade required/);
+  assert.match(source, /legacy\.handleCommand\(\{ type: "STOP_LOCK" \}\)/);
+});
+
+test("VideoService 使用实际含视频的 iframe 状态并延迟确认强控", () => {
+  const service = loadVideoService();
+  const result = service.aggregateFrameResults([
+    { frameId: 0, result: { ok: true, rate: 1, targetRate: 1, rateLocked: false, rateStable: false, volume: 0.8, muted: false, mediaCount: 0, applied: 0 } },
+    { frameId: 9, result: { ok: true, rate: 5, targetRate: 5, rateLocked: true, rateStable: true, volume: 0.8, muted: false, mediaCount: 1, applied: 1 } }
+  ], { type: "SET_RATE", rate: 5 });
+
+  assert.equal(result.rate, 5);
+  assert.equal(result.targetRate, 5);
+  assert.equal(result.rateLocked, true);
+  assert.equal(result.rateStable, true);
+  assert.equal(result.mediaCount, 1);
+});
+
+test("VideoService 会采用其他 iframe 已显示的 Video.js 总时长", () => {
+  const service = loadVideoService();
+  const result = service.aggregateFrameResults([
+    { frameId: 0, result: { ok: true, rate: 1, volume: 0.8, muted: false, mediaCount: 1, duration: 0, currentTime: 0, applied: 0 } },
+    { frameId: 6, result: { ok: true, rate: 1, volume: 0.8, muted: false, mediaCount: 0, duration: 506, currentTime: 98, durationSource: "videojs-dom", applied: 0 } }
+  ], { type: "GET_STATUS" });
+  assert.equal(result.duration, 506);
+  assert.equal(result.currentTime, 98);
+  assert.equal(result.durationSource, "videojs-dom");
+  assert.equal(result.mediaCount, 1);
+});
+
+test("主环境媒体核心具备属性锁、反覆盖和分阶段修复", () => {
+  const source = fs.readFileSync(path.join(root, "content/media-core-main.js"), "utf8");
+  assert.match(source, /nativeGetOwnPropertyDescriptor\(nativeMediaPrototype, "playbackRate"\)/);
+  assert.match(source, /capturePristineRuntime\(\)/);
+  assert.match(source, /document\.createElement\("iframe"\)/);
+  assert.match(source, /installPropertyGuard\("playbackRate"\)/);
+  assert.match(source, /installDefinePropertyGuard\(\)/);
+  assert.match(source, /Object\.defineProperties = function/);
+  assert.match(source, /Reflect\.defineProperty = function/);
+  assert.match(source, /target === mediaPrototype && controlled/);
+  assert.match(source, /\[0, 120, 600, 1200\]\.forEach/);
+  assert.match(source, /state\.transientLockUntil = Date\.now\(\) \+ 1500/);
+  assert.match(source, /shadowRoots\.add/);
+  assert.match(source, /MutationObserver/);
+  assert.match(source, /now - lastIntegrityScan >= 30000/);
+});
+
+test("倍速强控可阻止原生 setter 绕过并按需逐帧恢复", () => {
+  const source = fs.readFileSync(path.join(root, "content/media-core-main.js"), "utf8");
+  assert.match(source, /rateLocked:\s*false/);
+  assert.match(source, /if \(isRateProperty\(property\) && state\.rateLocked\) return true/);
+  assert.match(source, /if \(isRateProperty\(property\) && isGuarded\(property\)\) return state\.externalRateMasked \? 1 : state\.rate/);
+  assert.match(source, /nativeMethods\.addEventListener\.call\(document, "ratechange", interceptRateChange, true\)/);
+  assert.match(source, /function runRateDefenseFrame\(\)/);
+  assert.match(source, /global\.requestAnimationFrame/);
+  assert.match(source, /state\.rateDefenseUntil = Math\.max/);
+  assert.match(source, /if \(!state\.rateLocked && !state\.lockRequested && !state\.keepPlaying\) return/);
+  assert.match(source, /setInterval\(function \(\) \{[\s\S]*?synchronizeAll\(\);[\s\S]*?\}, 250\)/);
+  assert.match(source, /rateStable:\s*rateStable/);
+  assert.match(source, /return state\.externalRateMasked \? 1 : state\.rate/);
+  assert.match(source, /state\.externalRateMasked = true/);
+  assert.match(source, /chaoxing\\\.com/);
+  assert.match(source, /function videoJsPlayer\(media\)/);
+  assert.match(source, /videojs\.getPlayer/);
+  assert.match(source, /timedRangeEnd\(media\.seekable\)/);
+  assert.match(source, /function parseClockTime\(value\)/);
+  assert.match(source, /videoJsDomTime\(media, "\.vjs-duration-display"\)/);
+  assert.match(source, /videoJsDomTime\(media, "\.vjs-current-time-display"\)/);
+  assert.match(source, /videoJsDomTime\(null, "\.vjs-duration-display"\)/);
+  assert.match(source, /videoJsDomTime\(null, "\.vjs-current-time-display"\)/);
+  assert.match(source, /durationSource = "videojs-dom"/);
+  assert.match(source, /durationSource:\s*info\.durationSource/);
+  assert.match(source, /WinSpeedBallMediaCoreV6/);
+  assert.match(source, /function resumeAfterRateChange\(media\)/);
+  assert.match(source, /function resumeAfterRateChange\(media\)[\s\S]*?playMedia\(target\);[\s\S]*?\[120, 600, 1200\]\.forEach/);
+  assert.match(source, /SESSION_STATE_KEY = "__winspeedball_media_state_v6"/);
+  assert.match(source, /function restoreContinuousState\(\)/);
+  assert.match(source, /function persistContinuousState\(\)/);
+  assert.match(source, /\["loadstart", "loadedmetadata", "loadeddata", "canplay"/);
+  assert.match(source, /attributeFilter: \["src"\]/);
+  assert.match(source, /continuousPlayback:\s*state\.continuousPlayback/);
+  const setRateBlock = source.slice(source.indexOf('case "SET_RATE":'), source.indexOf('case "STEP_UP":'));
+  assert.doesNotMatch(setRateBlock, /continuousPlayback = true|resumeAfterRateChange/);
+  assert.match(source, /case "ENABLE_AUTOPLAY":[\s\S]*?state\.continuousPlayback = true[\s\S]*?resumeAfterRateChange\(media\)/);
+  assert.match(source, /case "STOP_LOCK":[\s\S]*?state\.rateLocked = false[\s\S]*?stopRateDefense\(\)/);
+});
+
+test("视频控制会发现跨域播放器并注册页面早期强控", () => {
+  const client = fs.readFileSync(path.join(root, "popup/message-client.js"), "utf8");
+  const popup = fs.readFileSync(path.join(root, "popup.js"), "utf8");
+  const html = fs.readFileSync(path.join(root, "popup.html"), "utf8");
+  assert.match(client, /document\.querySelectorAll\("iframe,frame"\)/);
+  assert.match(client, /chrome\.permissions\.request\(\{ origins: requested \}/);
+  assert.match(client, /id = "winspeedball-media-preload"/);
+  assert.match(client, /js: \["shadow_hook\.js", "content\/media-core-main\.js"\]/);
+  assert.match(client, /runAt: "document_start"/);
+  assert.match(client, /allFrames: true/);
+  assert.match(client, /world: "MAIN"/);
+  assert.match(popup, /getCurrentSiteAccess\(\)\.then\(ensureMediaAccess\)/);
+  assert.equal(popup.includes("\\u5df2\\u542f\\u7528\\u6df1\\u5ea6\\u5f3a\\u63a7"), true);
+  assert.match(popup, /videoDurationRetryCount < 4/);
+  for (const id of ["playVideoBtn", "pauseVideoBtn", "enableAutoplayBtn", "disableAutoplayBtn"]) {
+    assert.match(html, new RegExp(`id="${id}"`));
+    assert.match(popup, new RegExp(`\\$\\("${id}"\\)\\.addEventListener`));
+  }
+});
+
 test("一次应用命令不再隐式启动锁定定时器", () => {
   const source = fs.readFileSync(path.join(root, "content_script.js"), "utf8");
   for (const command of ["SET_RATE", "STEP_UP", "STEP_DOWN", "SET_MUTED", "TOGGLE_MUTED", "SET_VOLUME"]) {
@@ -197,6 +314,25 @@ test("区域截图按能力探测内容脚本，不依赖过期版本字符串",
   const source = fs.readFileSync(path.join(root, "background.js"), "utf8");
   assert.match(source, /typeof window\.winSpeedBall\.startRegionCapture === "function"/);
   assert.equal(source.includes("2026-07-11-player-adapters-v1"), false);
+});
+
+test("重复启动区域截图会先清理旧框选再重新开始", () => {
+  const source = fs.readFileSync(path.join(root, "content_script.js"), "utf8");
+  assert.match(source, /var regionCaptureCleanup = null/);
+  assert.match(source, /if \(regionCaptureActive && typeof regionCaptureCleanup === "function"\)\s*\{\s*regionCaptureCleanup\(false\)/);
+  assert.doesNotMatch(source, /Region capture is already active/);
+  assert.match(source, /overlay\.id = "winspeedball-region-overlay"/);
+  assert.match(source, /selection\.id = "winspeedball-region-selection"/);
+});
+
+test("区域截图遮罩接管 iframe 上方的鼠标事件", () => {
+  const source = fs.readFileSync(path.join(root, "content_script.js"), "utf8");
+  const capture = source.slice(source.indexOf("function startRegionCapture"), source.indexOf("function handleCommand"));
+  const overlayStyle = capture.slice(capture.indexOf("overlay.style.cssText"), capture.indexOf("selection.style.cssText"));
+  assert.match(overlayStyle, /"pointer-events:auto"/);
+  assert.match(overlayStyle, /"cursor:default!important"/);
+  assert.doesNotMatch(overlayStyle, /crosshair/);
+  assert.doesNotMatch(overlayStyle, /"pointer-events:none"/);
 });
 
 test("显式暂停只控制当前媒体，并且不会被自动续播恢复", async () => {

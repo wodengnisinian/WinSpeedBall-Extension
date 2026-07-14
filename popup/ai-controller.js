@@ -6,6 +6,22 @@
     var sendMessage = dependencies.sendMessage;
     var storage = dependencies.storage;
     var history = [];
+    function showReplyWindow(answer) {
+      answer = String(answer || "").trim();
+      if (!answer) return Promise.resolve({ ok: false, error: "AI 回复为空。" });
+      var screenInfo = global.screen || {};
+      return sendMessage({ action: "showAiReplyWindow", payload: {
+        content: answer,
+        windowLeft: Number(global.screenX || 0),
+        windowTop: Number(global.screenY || 0),
+        windowWidth: Number(global.outerWidth || 320),
+        windowHeight: Number(global.outerHeight || 340),
+        screenLeft: Number(screenInfo.availLeft || 0),
+        screenTop: Number(screenInfo.availTop || 0),
+        screenWidth: Number(screenInfo.availWidth || global.outerWidth || 320),
+        screenHeight: Number(screenInfo.availHeight || global.outerHeight || 340)
+      } });
+    }
 
     function buildPrompt(sourceText) {
       var mode = byId("aiMode").value;
@@ -53,7 +69,10 @@
         entry.addEventListener("click", function () {
           byId("aiMode").value = item.mode || "custom";
           byId("aiQuestion").value = item.question || "";
-          if (item.answer) byId("aiAnswer").value = item.answer;
+          if (item.answer) {
+            byId("aiAnswer").value = item.answer;
+            showReplyWindow(item.answer);
+          }
         });
         wrap.appendChild(entry);
       });
@@ -77,7 +96,12 @@
 
     function clearHistory() {
       history = [];
-      storage.set({ aiQuestionHistory: [] }, renderHistory);
+      storage.set({ aiQuestionHistory: [] }, function (result) {
+        renderHistory();
+        dependencies.addDetailedLog("AI", result && result.ok === false ? "清空 AI 历史失败" : "清空 AI 历史成功", {
+          原因: result && result.error || "-"
+        }, result && result.ok === false ? "error" : "success");
+      });
     }
 
     function ask(sourceText, options) {
@@ -139,6 +163,7 @@
       loadHistory: loadHistory,
       clearHistory: clearHistory,
       renderHistory: renderHistory,
+      showReplyWindow: showReplyWindow,
       buildPrompt: buildPrompt,
       buildAutoOcrPrompt: buildAutoOcrPrompt
     };

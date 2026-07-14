@@ -33,6 +33,7 @@
       var specialPlayerType = "";
       var reason = "";
       var mediaInfo = null;
+      var authoritative = null;
       var media = [];
 
       (results || []).forEach(function (item, frameIndex) {
@@ -40,7 +41,9 @@
         if (!result) result = { ok: false, error: "no result", mediaCount: 0, applied: 0 };
         frameResults.push(result);
         if (result.ok && !firstOk) firstOk = result;
-        if (!mediaInfo && result.ok && result.mediaCount > 0) mediaInfo = result;
+        if (result.ok && (result.mediaCount > 0 || Number(result.duration || 0) > 0)) {
+          if (!mediaInfo || (Number(mediaInfo.duration || 0) <= 0 && Number(result.duration || 0) > 0)) mediaInfo = result;
+        }
         totalMedia += result.mediaCount || 0;
         totalApplied += result.applied || 0;
         if (result.specialPlayerDetected) {
@@ -67,23 +70,31 @@
         });
       });
 
-      if (firstOk && command && command.type !== "GET_STATUS" && command.type !== "EXTRACT_PAGE_TEXT") {
-        currentRate = firstOk.rate;
-        currentMuted = firstOk.muted;
-        currentVolume = firstOk.volume;
+      authoritative = mediaInfo || firstOk;
+
+      if (authoritative && command && command.type !== "GET_STATUS" && command.type !== "EXTRACT_PAGE_TEXT") {
+        currentRate = authoritative.targetRate == null ? authoritative.rate : authoritative.targetRate;
+        currentMuted = authoritative.muted;
+        currentVolume = authoritative.volume;
         storage.set({ rate: currentRate, muted: currentMuted, volume: currentVolume });
       }
 
       var output = {
         ok: !!firstOk,
-        rate: firstOk ? firstOk.rate : currentRate,
-        muted: firstOk ? firstOk.muted : currentMuted,
-        volume: firstOk ? firstOk.volume : currentVolume,
-        keepPlaying: firstOk ? !!firstOk.keepPlaying : false,
-        controlMode: firstOk ? firstOk.controlMode || "stopped" : "stopped",
+        rate: authoritative ? authoritative.rate : currentRate,
+        targetRate: authoritative && authoritative.targetRate != null ? authoritative.targetRate : authoritative ? authoritative.rate : currentRate,
+        rateLocked: authoritative ? authoritative.rateLocked === true : false,
+        rateStable: authoritative ? authoritative.rateStable !== false : false,
+        externalRateMasked: authoritative ? authoritative.externalRateMasked === true : false,
+        muted: authoritative ? authoritative.muted : currentMuted,
+        volume: authoritative ? authoritative.volume : currentVolume,
+        keepPlaying: authoritative ? !!authoritative.keepPlaying : false,
+        continuousPlayback: authoritative ? authoritative.continuousPlayback === true : false,
+        controlMode: authoritative ? authoritative.controlMode || "stopped" : "stopped",
         playerAdapter: mediaInfo ? mediaInfo.playerAdapter || "" : firstOk ? firstOk.playerAdapter || "" : "",
         playerType: mediaInfo ? mediaInfo.playerType || "" : firstOk ? firstOk.playerType || "" : "",
         duration: mediaInfo ? mediaInfo.duration || 0 : 0,
+        durationSource: mediaInfo ? mediaInfo.durationSource || "" : "",
         currentTime: mediaInfo ? mediaInfo.currentTime || 0 : 0,
         remainingTime: mediaInfo ? mediaInfo.remainingTime || 0 : 0,
         paused: mediaInfo ? !!mediaInfo.paused : true,
@@ -103,7 +114,7 @@
       return output;
     }
 
-    function sendCommandToAllFrames(tabId, command, callback) {
+    function sendIsolatedCommandToAllFrames(tabId, command, callback) {
       function executeCommand(done) {
         chrome.scripting.executeScript({
           target: { tabId: tabId, allFrames: true },
@@ -168,8 +179,124 @@
       }
     }
 
+    function sendMainWorldCommandToAllFrames(tabId, command, callback) {
+      function executeCommand(done) {
+        chrome.scripting.executeScript({
+          target: { tabId: tabId, allFrames: true },
+          world: "MAIN",
+          func: function (cmd) {
+            if (window.WinSpeedBallMediaCoreV6 && typeof window.WinSpeedBallMediaCoreV6.handleCommand === "function") {
+              return window.WinSpeedBallMediaCoreV6.handleCommand(cmd);
+            }
+            return { ok: false, error: "main media core upgrade required", url: location.href, mediaCount: 0, applied: 0 };
+          },
+          args: [command]
+        }, done);
+      }
+
+      function finish(results) {
+        var error = lastErrorMessage();
+        if (error) {
+          callback(Object.assign({ ok: false, error: error, mediaCount: 0, applied: 0, frameCount: 0, frameResults: [] }, getState()));
+          return;
+        }
+        callback(aggregateFrameResults(results || [], command));
+      }
+
+      try {
+        executeCommand(function (results) {
+          var error = lastErrorMessage();
+          if (error) {
+            callback(Object.assign({ ok: false, error: error, mediaCount: 0, applied: 0, frameCount: 0, frameResults: [] }, getState()));
+            return;
+          }
+          var unloaded = !results || !results.length || results.some(function (item) {
+            return item && item.result && item.result.error === "main media core upgrade required";
+          });
+          if (!unloaded) {
+            finish(results);
+            return;
+          }
+          chrome.scripting.executeScript({
+            target: { tabId: tabId, allFrames: true },
+            world: "MAIN",
+            func: function () {
+              var legacy = window.WinSpeedBallMediaCoreV5 || window.WinSpeedBallMediaCoreV4 || window.WinSpeedBallMediaCoreV3 || window.WinSpeedBallMediaCore;
+              if (!window.WinSpeedBallMediaCoreV6 && legacy && typeof legacy.handleCommand === "function") {
+                try { legacy.handleCommand({ type: "STOP_LOCK" }); } catch (error) {}
+              }
+              return true;
+            }
+          }, function () {
+            lastErrorMessage();
+            chrome.scripting.executeScript({
+              target: { tabId: tabId, allFrames: true },
+              world: "MAIN",
+              files: ["shadow_hook.js", "content/media-core-main.js"]
+            }, function () {
+              var injectError = lastErrorMessage();
+              if (injectError) {
+                callback({ ok: false, error: injectError, mediaCount: 0, applied: 0, frameCount: 0, frameResults: [] });
+                return;
+              }
+              executeCommand(finish);
+            });
+          });
+        });
+      } catch (error) {
+        callback(Object.assign({
+          ok: false,
+          error: error.message || String(error),
+          mediaCount: 0,
+          applied: 0,
+          frameCount: 0,
+          frameResults: []
+        }, getState()));
+      }
+    }
+
+    function sendCommandToAllFrames(tabId, command, callback) {
+      if (command && command.type === "EXTRACT_PAGE_TEXT") {
+        sendIsolatedCommandToAllFrames(tabId, command, callback);
+        return;
+      }
+      sendMainWorldCommandToAllFrames(tabId, command, callback);
+    }
+
     function controlTab(tabId, command, callback) {
-      sendCommandToAllFrames(tabId, command || { type: "GET_STATUS" }, callback);
+      command = command || { type: "GET_STATUS" };
+      var rateCommand = ["SET_RATE", "STEP_UP", "STEP_DOWN"].indexOf(command.type) >= 0;
+      if (!rateCommand) {
+        sendCommandToAllFrames(tabId, command, callback);
+        return;
+      }
+      sendCommandToAllFrames(tabId, command, function (initial) {
+        if (!initial || !initial.ok || !initial.mediaCount) {
+          callback(initial || { ok: false, error: "未检测到可控制的视频。", mediaCount: 0, applied: 0 });
+          return;
+        }
+        var expectedRate = Number(command.type === "SET_RATE" ? command.rate : initial.targetRate || initial.rate);
+        setTimeout(function () {
+          sendCommandToAllFrames(tabId, { type: "GET_STATUS" }, function (verified) {
+            verified = verified || { ok: false, mediaCount: 0 };
+            var measuredRate = Number(verified.rate || 0);
+            var rateStable = verified.ok && verified.mediaCount > 0 && verified.rateLocked === true && verified.rateStable !== false &&
+              Number.isFinite(expectedRate) && Math.abs(measuredRate - expectedRate) <= 0.01;
+            var result = Object.assign({}, verified, {
+              ok: rateStable,
+              applied: initial.applied || 0,
+              targetRate: expectedRate,
+              verifiedAfterMs: 700
+            });
+            if (!rateStable) {
+              result.error = verified.mediaCount > 0
+                ? "目标倍速未能稳定保持，页面仍在覆盖播放速度。请刷新视频页面后重试。"
+                : "延迟校验时未检测到可控制的视频。";
+            }
+            callback(result);
+          });
+        }, 700);
+      });
     }
 
     return {

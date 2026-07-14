@@ -32,9 +32,32 @@
   function prepareWorld(scriptId) {
     return chrome.userScripts.configureWorld({
       worldId: worldId(scriptId),
-      messaging: false,
+      messaging: true,
       csp: "script-src 'self'; object-src 'none'"
     });
+  }
+
+  function declaredCapabilities(code) {
+    var capabilities = [];
+    String(code || "").split(/\r?\n/).forEach(function (line) {
+      var match = line.match(/^\s*\/\/\s*@wsb-capability\s+([^\s]+)\s*$/i);
+      if (!match) return;
+      var capability = String(match[1] || "").trim().toLowerCase();
+      if (capability && capabilities.indexOf(capability) < 0) capabilities.push(capability);
+    });
+    return capabilities;
+  }
+
+  function publicWsbFacade(code) {
+    if (declaredCapabilities(code).indexOf("video.read") < 0) return "";
+    return [
+      "var WSB=Object.freeze({",
+      "version:'0.1.0-beta',",
+      "video:Object.freeze({",
+      "getStatus:function(){return chrome.runtime.sendMessage({channel:'WSB_USER_SCRIPT_BRIDGE',version:1,action:'GET_VIDEO_STATUS'});}",
+      "})",
+      "});"
+    ].join("");
   }
 
   function wrapCode(code, meta, guardUrl) {
@@ -51,7 +74,7 @@
         "if(!__wsbMatches.length||__wsbExcludes.some(function(p){return __wsbMatch(p,__wsbUrl);})||!__wsbMatches.some(function(p){return __wsbMatch(p,__wsbUrl);}))return;"
       ].join("");
     }
-    return "(function(){" + guard + "try{\n" + code + "\n}catch(error){console.error('WinSpeedBall user script failed',error);throw error;}})();";
+    return "(function(){" + guard + publicWsbFacade(code) + "try{\n" + code + "\n}catch(error){console.error('WinSpeedBall user script failed',error);throw error;}})();";
   }
 
   function normalizeRunAt(value) {

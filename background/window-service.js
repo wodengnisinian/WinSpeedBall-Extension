@@ -3,7 +3,7 @@
 
   var SESSION_KEY = "pinnedPopupWindowId";
   var STATE_KEY = "pinnedPopupWindowState";
-  var DEFAULT_BOUNDS = { width: 400, height: 420 };
+  var DEFAULT_BOUNDS = { width: 320, height: 340 };
   var openRequest = null;
   var boundsSaveTimer = null;
   var pendingBoundsWindow = null;
@@ -47,8 +47,8 @@
   function normalizeBounds(value) {
     value = value || {};
     var bounds = {
-      width: Number.isFinite(value.width) ? Math.max(380, Math.min(4000, Math.round(value.width))) : DEFAULT_BOUNDS.width,
-      height: Number.isFinite(value.height) ? Math.max(320, Math.min(4000, Math.round(value.height))) : DEFAULT_BOUNDS.height
+      width: DEFAULT_BOUNDS.width,
+      height: DEFAULT_BOUNDS.height
     };
     if (Number.isFinite(value.left)) bounds.left = Math.round(value.left);
     if (Number.isFinite(value.top)) bounds.top = Math.round(value.top);
@@ -232,7 +232,24 @@
           boundsSaveTimer = null;
           var pending = pendingBoundsWindow;
           pendingBoundsWindow = null;
-          if (pending) saveWindowState(pending, true);
+          if (!pending) return;
+          if (pending.width === DEFAULT_BOUNDS.width && pending.height === DEFAULT_BOUNDS.height) {
+            saveWindowState(pending, true);
+            return;
+          }
+          chrome.windows.update(pending.id, {
+            width: DEFAULT_BOUNDS.width,
+            height: DEFAULT_BOUNDS.height
+          }, function (updated) {
+            var error = lastErrorMessage();
+            var corrected = Object.assign({}, pending, error || !updated ? {} : updated, {
+              left: pending.left,
+              top: pending.top,
+              width: DEFAULT_BOUNDS.width,
+              height: DEFAULT_BOUNDS.height
+            });
+            saveWindowState(corrected, true);
+          });
         }, 250);
       });
     });

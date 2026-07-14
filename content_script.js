@@ -31,6 +31,7 @@
   var lastIntegrityScan = 0;
   var regionCaptureActive = false;
   var regionCaptureToken = "";
+  var regionCaptureCleanup = null;
   var contentRequestSequence = 0;
   var knownMedia = new WeakSet();
   var mediaRegistry = new Set();
@@ -494,7 +495,16 @@
   }
 
   function startRegionCapture(captureToken) {
-    if (regionCaptureActive) return { ok: false, error: "Region capture is already active." };
+    if (regionCaptureActive && typeof regionCaptureCleanup === "function") {
+      regionCaptureCleanup(false);
+    } else if (regionCaptureActive) {
+      regionCaptureActive = false;
+      regionCaptureToken = "";
+      ["winspeedball-region-overlay", "winspeedball-region-selection"].forEach(function (id) {
+        var stale = document.getElementById(id);
+        if (stale && stale.parentNode) stale.parentNode.removeChild(stale);
+      });
+    }
     captureToken = String(captureToken || "");
     if (captureToken.length < 16) return { ok: false, error: "Capture authorization is invalid." };
     regionCaptureActive = true;
@@ -506,6 +516,8 @@
     var dragging = false;
     var overlay = document.createElement("div");
     var selection = document.createElement("div");
+    overlay.id = "winspeedball-region-overlay";
+    selection.id = "winspeedball-region-selection";
     sendRuntimeMessage({ action: "setCaptureIndicator", active: true, captureToken: captureToken });
 
     overlay.style.cssText = [
@@ -513,7 +525,9 @@
       "inset:0",
       "z-index:2147483647",
       "background:transparent",
-      "pointer-events:none",
+      "pointer-events:auto",
+      "cursor:default!important",
+      "touch-action:none",
       "user-select:none"
     ].join(";");
     selection.style.cssText = [
@@ -536,13 +550,13 @@
         selection.style.borderWidth = width + "px";
       });
     } catch (e) {}
-    document.documentElement.appendChild(overlay);
-    document.documentElement.appendChild(selection);
-
     function cleanup(keepIndicator) {
-      var cleanupToken = regionCaptureToken;
-      regionCaptureActive = false;
-      regionCaptureToken = "";
+      var cleanupToken = captureToken;
+      if (regionCaptureCleanup === cleanup) {
+        regionCaptureActive = false;
+        regionCaptureToken = "";
+        regionCaptureCleanup = null;
+      }
       document.removeEventListener("keydown", onKeyDown, true);
       document.removeEventListener("mousedown", onMouseDown, true);
       document.removeEventListener("mousemove", onMouseMove, true);
@@ -550,6 +564,15 @@
       if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
       if (selection.parentNode) selection.parentNode.removeChild(selection);
       if (!keepIndicator) sendRuntimeMessage({ action: "setCaptureIndicator", active: false, captureToken: cleanupToken });
+    }
+
+    regionCaptureCleanup = cleanup;
+    try {
+      document.documentElement.appendChild(overlay);
+      document.documentElement.appendChild(selection);
+    } catch (error) {
+      cleanup(false);
+      return { ok: false, error: error && error.message || String(error) };
     }
 
     function onKeyDown(event) {

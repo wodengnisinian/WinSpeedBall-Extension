@@ -110,6 +110,25 @@
     return "";
   }
 
+  function validateLogRecordPayload(payload) {
+    var error = checkKeys(payload, ["record"], ["record"]);
+    if (error) return error;
+    var record = payload.record;
+    if (!isObject(record)) return "Log record must be an object.";
+    error = checkKeys(record, ["id", "timestamp", "level", "category", "message", "details"], ["id", "timestamp", "level", "category", "message", "details"]);
+    if (error) return error;
+    if (typeof record.id !== "string" || !record.id || record.id.length > 120) return "Log record ID is invalid.";
+    if (typeof record.timestamp !== "string" || record.timestamp.length > 64 || Number.isNaN(Date.parse(record.timestamp))) return "Log record timestamp is invalid.";
+    if (["error", "warn", "success", "info"].indexOf(record.level) < 0) return "Log record level is invalid.";
+    if (typeof record.category !== "string" || !record.category.trim() || record.category.length > 40) return "Log record category is invalid.";
+    if (typeof record.message !== "string" || !record.message.trim() || record.message.length > 500) return "Log record message is invalid.";
+    if (!isObject(record.details) || Object.keys(record.details).length > 30) return "Log record details are invalid.";
+    if (Object.keys(record.details).some(function (key) {
+      return !key || key.length > 40 || typeof record.details[key] !== "string" || record.details[key].length > 500;
+    })) return "Log record details are invalid.";
+    return "";
+  }
+
   function validUsername(value) {
     return typeof value === "string" && /^[A-Za-z0-9\u4e00-\u9fff_.-]{3,32}$/.test(value.trim());
   }
@@ -198,6 +217,7 @@
       return typeof payload.dataUrl === "string" && /^data:image\/png;base64,/i.test(payload.dataUrl) && payload.dataUrl.length <= MAX_IMAGE_LENGTH ? "" : "Capture image is invalid or too large.";
     } },
     getManualCapture: { sources: ["popup"], validate: noPayload },
+    retryManualOcr: { sources: ["popup"], validate: noPayload },
     getUsageDeclaration: { sources: ["popup"], validate: noPayload },
     acceptUsageDeclaration: { sources: ["popup"], validate: function (payload) {
       var error = checkKeys(payload, ["version", "accepted"], ["version", "accepted"]);
@@ -246,6 +266,8 @@
       if (!validSdkScriptId(payload.scriptId)) return "SDK script ID is invalid.";
       return payload.confirmed === true ? "" : "SDK script deletion must be explicitly confirmed.";
     } },
+    appendPopupLog: { sources: ["popup"], validate: validateLogRecordPayload },
+    clearPopupLogs: { sources: ["popup"], validate: noPayload },
     openPinnedWindow: { sources: ["popup"], validate: noPayload },
     registerUser: { sources: ["popup"], validate: validateRegister },
     loginUser: { sources: ["popup"], validate: validateLogin },
@@ -270,6 +292,19 @@
     saveApiKey: { sources: ["popup"], validate: validateAiSettings },
     getSettings: { sources: ["popup"], validate: noPayload },
     getActiveSiteAccess: { sources: ["popup"], validate: noPayload },
+    showAiReplyWindow: { sources: ["popup"], validate: function (payload) {
+      var boundsKeys = ["screenLeft", "screenTop", "screenWidth", "screenHeight"];
+      var error = checkKeys(payload, ["content", "windowLeft", "windowTop", "windowWidth", "windowHeight"].concat(boundsKeys), ["content", "windowLeft", "windowTop", "windowWidth", "windowHeight"]);
+      if (error) return error;
+      if (typeof payload.content !== "string" || !payload.content.trim() || payload.content.length > 2 * 1024 * 1024) return "AI reply is invalid or too large.";
+      if (![payload.windowLeft, payload.windowTop, payload.windowWidth, payload.windowHeight].every(isFiniteNumber)) return "AI reply window bounds are invalid.";
+      if (payload.windowWidth < 100 || payload.windowWidth > 2000 || payload.windowHeight < 100 || payload.windowHeight > 2000) return "AI reply window size is invalid.";
+      var suppliedScreenBounds = boundsKeys.filter(function (key) { return Object.prototype.hasOwnProperty.call(payload, key); });
+      if (suppliedScreenBounds.length && suppliedScreenBounds.length !== boundsKeys.length) return "AI reply screen bounds are incomplete.";
+      if (suppliedScreenBounds.length && !boundsKeys.map(function (key) { return payload[key]; }).every(isFiniteNumber)) return "AI reply screen bounds are invalid.";
+      if (suppliedScreenBounds.length && (payload.screenWidth < 100 || payload.screenWidth > 20000 || payload.screenHeight < 100 || payload.screenHeight > 20000)) return "AI reply screen size is invalid.";
+      return "";
+    } },
     executeUserScript: { sources: ["popup"], validate: function (payload) {
       var error = checkKeys(payload, ["scriptId", "code", "permissions", "permissionConfirmed"], ["scriptId", "code", "permissions", "permissionConfirmed"]);
       if (error) return error;

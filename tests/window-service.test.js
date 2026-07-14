@@ -104,8 +104,8 @@ test("固定按钮首次创建独立 popup 窗口", async () => {
   const created = fixture.windows.get(result.windowId);
   assert.equal(created.type, "popup");
   assert.equal(created.url, "chrome-extension://extension-id/popup.html?pinned=1");
-  assert.equal(created.width, 400);
-  assert.equal(created.height, 420);
+  assert.equal(created.width, 320);
+  assert.equal(created.height, 340);
   assert.equal(fixture.sessionData.pinnedPopupWindowId, result.windowId);
   assert.equal(fixture.localData.pinnedPopupWindowState.open, true);
 });
@@ -133,7 +133,7 @@ test("固定窗口关闭后会清除会话记录", async () => {
   assert.equal(fixture.counts().createCount, 2);
 });
 
-test("窗口关闭后重新打开会恢复上次位置和大小", async () => {
+test("窗口关闭后重新打开只恢复位置并保持固定大小", async () => {
   const fixture = buildWindowService();
   const first = await fixture.service.openPinnedWindow();
   const current = fixture.windows.get(first.windowId);
@@ -147,7 +147,7 @@ test("窗口关闭后重新打开会恢复上次位置和大小", async () => {
       width: fixture.localData.pinnedPopupWindowState.width,
       height: fixture.localData.pinnedPopupWindowState.height
     },
-    { left: 120, top: 80, width: 640, height: 560 }
+    { left: 120, top: 80, width: 320, height: 340 }
   );
   fixture.windows.delete(first.windowId);
   fixture.removedListeners[0](first.windowId);
@@ -157,7 +157,7 @@ test("窗口关闭后重新打开会恢复上次位置和大小", async () => {
   assert.equal(reopened.restored, true);
   assert.deepEqual(
     { left: restored.left, top: restored.top, width: restored.width, height: restored.height },
-    { left: 120, top: 80, width: 640, height: 560 }
+    { left: 120, top: 80, width: 320, height: 340 }
   );
 });
 
@@ -231,5 +231,14 @@ test("连续窗口尺寸变化只保存最后一次状态", async () => {
   }
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.equal(fixture.localData.pinnedPopupWindowState.left, 19);
-  assert.equal(fixture.localData.pinnedPopupWindowState.width, 519);
+  assert.equal(fixture.localData.pinnedPopupWindowState.width, 320);
+  assert.equal(fixture.localData.pinnedPopupWindowState.height, 340);
+});
+
+test("固定窗口忽略外部传入的其他尺寸", () => {
+  const fixture = buildWindowService();
+  const small = fixture.service.normalizeBounds({ width: 120, height: 90 });
+  const large = fixture.service.normalizeBounds({ width: 1920, height: 1080 });
+  assert.deepEqual(JSON.parse(JSON.stringify(small)), { width: 320, height: 340 });
+  assert.deepEqual(JSON.parse(JSON.stringify(large)), { width: 320, height: 340 });
 });

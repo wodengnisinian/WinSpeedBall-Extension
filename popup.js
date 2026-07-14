@@ -3,12 +3,18 @@
 
   var lastCaptureDataUrl = "";
   var lastCaptureTime = 0;
-  var ocrRunId = 0;
   var autoAiRequestSourceTime = 0;
   var latestPageText = "";
   var logs = [];
   var logsLoaded = false;
+  var pendingLogEntries = [];
+  var videoDurationRetryTimer = null;
+  var videoDurationRetryCount = 0;
+  var lastVideoStatus = null;
+  var logApi = window.WinSpeedBallLogRecord;
   var lastPanelId = "videoPanel";
+  var panelSelectedThisOpen = false;
+  var panelScrollPositions = Object.create(null);
   var MAX_SAVED_SCRIPT_LENGTH = 200000;
   var MIN_AUTO_INTERVAL_SECONDS = 30;
   var navRevealTimer = null;
@@ -39,7 +45,6 @@
   var aiProviderOptions = [];
   var usageDeclaration = null;
   var currentUserSession = null;
-  var isPinnedWindow = new URLSearchParams(window.location.search).get("pinned") === "1";
   var AI_PROVIDER_FALLBACKS = [
     { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash", requiresApiKey: true },
     { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-5.4-mini", requiresApiKey: true },
@@ -48,6 +53,29 @@
   ];
   var userScriptsAvailable = false;
   var scriptMigrationNeeded = false;
+  var MESSAGE_AUDIT_ACTIONS = {
+    startRegionCapture: ["OCR", "启动框选截图"],
+    retryManualOcr: ["OCR", "重新识别"],
+    acceptUsageDeclaration: ["使用声明", "接受使用声明"],
+    setDeveloperMode: ["开发者", "更新开发者模式"],
+    prepareSdkContext: ["开发者", "准备 SDK 上下文"],
+    prepareSdkSession: ["开发者", "创建 SDK 会话"],
+    invokeSdkSession: ["开发者", "调用 SDK 功能"],
+    closeSdkSession: ["开发者", "关闭 SDK 会话"],
+    deleteSdkScriptData: ["开发者", "删除 SDK 脚本数据"],
+    clearPrivacyData: ["隐私", "清理隐私数据"],
+    openPinnedWindow: ["窗口", "打开独立窗口"],
+    registerUser: ["账户", "注册账户"],
+    loginUser: ["账户", "登录账户"],
+    logoutUser: ["账户", "退出账户"],
+    updateUserProfile: ["账户", "更新账户资料"],
+    changeUserPassword: ["账户", "修改账户密码"],
+    deleteUserAccount: ["账户", "删除账户"],
+    saveAiSettings: ["AI", "保存 AI 设置"],
+    saveApiKey: ["AI", "保存 AI 密钥"],
+    syncUserScripts: ["脚本", "同步用户脚本"],
+    showAiReplyWindow: ["AI", "打开 AI 回复窗口"]
+  };
   var popupUtils = self.WinSpeedBallPopupUtils;
   var popupStorage = self.WinSpeedBallPopupStorage;
   var messageClient = self.WinSpeedBallPopupMessageClient;
@@ -62,11 +90,21 @@
   var normalizeNavZones = popupUtils.normalizeNavZones;
   var storageGet = popupStorage.get;
   var storageSet = popupStorage.set;
-  var sendMessage = messageClient.send;
+  var rawSendMessage = messageClient.send;
+  var sendMessage = sendMessageWithAudit;
   var getCurrentSiteAccess = messageClient.getCurrentSiteAccess;
   var ensureSiteAccess = messageClient.ensureSiteAccess;
   var requestCurrentSiteAccess = messageClient.requestCurrentSiteAccess;
+  var ensureMediaAccess = messageClient.ensureMediaAccess;
   var ensureServiceOrigin = messageClient.ensureServiceOrigin;
+  var windowModeController = self.WinSpeedBallPopupWindowMode.create({
+    search: window.location.search,
+    document: document,
+    storage: popupStorage,
+    openPinnedWindow: function () { return sendMessage({ action: "openPinnedWindow" }); },
+    closeWindow: function () { window.close(); }
+  });
+  var isPinnedWindow = windowModeController.isPinned;
   var developerDraftStore = self.WinSpeedBallDeveloperDraftStore.create({
     storage: popupStorage,
     contracts: self.WinSpeedBallSdkContracts
@@ -95,54 +133,7 @@
     top: { height: 32, left: 0, right: 380 }
   };
 
-  if (isPinnedWindow) document.body.classList.add("pinned-window");
-
-  function openPinnedWindowDirectly() {
-    return new Promise(function (resolve) {
-      try {
-        chrome.windows.create({
-          url: chrome.runtime.getURL("popup.html?pinned=1"),
-          type: "popup",
-          focused: true,
-          width: 400,
-          height: 420
-        }, function (created) {
-          var error = chrome.runtime.lastError && chrome.runtime.lastError.message;
-          resolve(error || !created
-            ? { ok: false, error: error || "无法创建固定窗口。" }
-            : { ok: true, pinned: true, windowId: created.id, fallback: true });
-        });
-      } catch (error) {
-        resolve({ ok: false, error: error.message || String(error) });
-      }
-    });
-  }
-
-  function bindPinnedWindow() {
-    var button = $("pinWindowBtn");
-    button.classList.toggle("active", isPinnedWindow);
-    button.title = isPinnedWindow ? "关闭固定窗口" : "固定为独立窗口";
-    button.setAttribute("aria-label", button.title);
-    button.addEventListener("click", function () {
-      if (isPinnedWindow) {
-        window.close();
-        return;
-      }
-      button.disabled = true;
-      button.title = "正在打开固定窗口...";
-      sendMessage({ action: "openPinnedWindow" }).then(function (response) {
-        if (!response.ok) return openPinnedWindowDirectly();
-        return response;
-      }).then(function (response) {
-        if (response.ok) {
-          window.close();
-          return;
-        }
-        button.disabled = false;
-        button.title = "固定失败：" + (response.error || "未知错误");
-      });
-    });
-  }
+  windowModeController.applyMode();
 
   function applyNavTransition() {
     document.body.style.setProperty("--nav-transition", navTransitionMs + "ms");
@@ -172,6 +163,12 @@
     storageSet({
       captureSelectionTone: captureSelectionTone,
       captureSelectionWidth: captureSelectionWidth
+    }, function (result) {
+      addDetailedLog("界面", result && result.ok === false ? "保存框选样式失败" : "保存框选样式成功", {
+        颜色深浅: captureSelectionTone,
+        边框粗细: captureSelectionWidth + "px",
+        原因: result && result.error || "-"
+      }, result && result.ok === false ? "error" : "success");
     });
   }
 
@@ -209,15 +206,16 @@
   }
 
   function setTopStatus(value) {
-    addLog(value);
+    addDetailedLog("状态", value, {});
   }
 
   function addLog(value) {
     if (!value) return;
-    var time = new Date().toLocaleTimeString();
-    logs.unshift("[" + time + "] " + value);
-    logs = logs.slice(0, 300);
-    if (logsLoaded) storageSet({ popupLogs: logs });
+    var entry = typeof value === "object" ? logApi.normalize(value) : logApi.create("状态", value, {});
+    if (!entry) return;
+    logs = logApi.normalizeList([entry].concat(logs), 500);
+    if (logsLoaded) persistLogEntry(entry);
+    else pendingLogEntries.push(entry);
     renderLogs();
   }
 
@@ -226,52 +224,221 @@
     return sourceTime ? ("#" + String(sourceTime).slice(-8)) : "#unknown";
   }
 
-  function safeLogValue(value) {
-    return String(value == null ? "" : value).replace(/\s+/g, " ").trim().slice(0, 180);
+  function addDetailedLog(category, message, details, level) {
+    addLog(logApi.create(category, message, details, level));
   }
 
-  function addDetailedLog(category, message, details) {
-    var suffix = [];
-    Object.keys(details || {}).forEach(function (key) {
-      var value = safeLogValue(details[key]);
-      if (value) suffix.push(key + "=" + value);
+  function persistLogEntry(entry) {
+    rawSendMessage({ action: "appendPopupLog", record: entry }).then(function () {});
+  }
+
+  function messageAuditDetails(message, response, startedAt) {
+    var action = String(message && message.action || "");
+    var payload = message && message.payload && typeof message.payload === "object" ? message.payload : message || {};
+    var details = {
+      动作: action,
+      耗时: Math.max(0, Date.now() - startedAt) + "ms"
+    };
+    if (payload.command) details.命令 = payload.command;
+    if (payload.interval) details.间隔 = payload.interval + "s";
+    if (action === "invokeSdkSession" && payload.request) {
+      details.SDK方法 = payload.request.method || "-";
+    }
+    if (action === "clearPrivacyData") details.范围 = payload.category || "-";
+    if (response && response.ok === false) details.原因 = response.error || "未知错误";
+    return details;
+  }
+
+  function messageAuditDescriptor(message) {
+    var action = String(message && message.action || "");
+    var payload = message && message.payload && typeof message.payload === "object" ? message.payload : message || {};
+    if (action === "saveAiSettings" && payload.clearApiKey) return ["AI", "清除 AI 密钥"];
+    if (MESSAGE_AUDIT_ACTIONS[action]) return MESSAGE_AUDIT_ACTIONS[action];
+    if (action === "douyinPanel" && payload.command !== "GET_STATE") {
+      return ["自动化", ({ START: "启动自动下一条", STOP: "停止自动下一条", NEXT: "执行下一条", SET_INTERVAL: "更新自动下一条间隔" })[payload.command] || "执行自动化操作"];
+    }
+    return null;
+  }
+
+  function sendMessageWithAudit(message) {
+    var action = String(message && message.action || "");
+    var audit = messageAuditDescriptor(message);
+    var startedAt = Date.now();
+    return rawSendMessage(message).then(function (response) {
+      if (audit) {
+        var succeeded = !!(response && response.ok !== false);
+        addDetailedLog(
+          audit[0],
+          audit[1] + (succeeded ? "成功" : "失败"),
+          messageAuditDetails(message, response, startedAt),
+          succeeded ? "success" : "error"
+        );
+      }
+      return response;
     });
-    addLog("[" + category + "] " + message + (suffix.length ? " | " + suffix.join(" | ") : ""));
   }
 
-  function loadLogs() {
+  function auditPanelCategory(element) {
+    var panel = element && element.closest ? element.closest(".panel") : null;
+    var categories = {
+      videoPanel: "视频",
+      ocrPanel: "OCR",
+      aiPanel: "AI",
+      bookPanel: "图书",
+      settingsPanel: "设置",
+      accountPanel: "账户",
+      privacyPanel: "隐私",
+      scriptPanel: "脚本",
+      developerPanel: "开发者",
+      logPanel: "日志"
+    };
+    return panel && categories[panel.id] || "界面";
+  }
+
+  function auditControlLabel(element) {
+    if (!element) return "未知操作";
+    if (element.closest && element.closest("#aiHistoryList")) return "打开 AI 历史记录";
+    var label = String(element.getAttribute("aria-label") || element.textContent || "").replace(/\s+/g, " ").trim();
+    if (!label && element.closest) {
+      var section = element.closest(".section");
+      var title = section && section.querySelector(".section-title");
+      if (title) label = String(title.textContent || "").replace(/\s+/g, " ").trim();
+    }
+    return (label || element.id || element.name || element.tagName || "未知操作").slice(0, 80);
+  }
+
+  function auditUiInteraction(element, type) {
+    if (!element || element.disabled) return;
+    var details = {
+      操作: auditControlLabel(element),
+      类型: type,
+      控件: element.id || element.name || element.tagName || "-"
+    };
+    if (element.type === "checkbox") details.状态 = element.checked ? "开启" : "关闭";
+    addDetailedLog(auditPanelCategory(element), "触发界面操作", details, "info");
+  }
+
+  function bindComprehensiveActionLogging() {
+    document.addEventListener("click", function (event) {
+      var button = event.target && event.target.closest ? event.target.closest("button") : null;
+      if (button) auditUiInteraction(button, "点击");
+    }, true);
+    document.addEventListener("change", function (event) {
+      var control = event.target;
+      if (!control || !control.matches || !control.matches("input,select,textarea")) return;
+      auditUiInteraction(control, "更改");
+    }, true);
+  }
+
+  function loadLogs(replace, callback) {
     storageGet(["popupLogs"], function (data) {
       var saved = Array.isArray(data.popupLogs) ? data.popupLogs : [];
-      logs = saved.concat(logs).filter(function (item, index, list) {
-        return list.indexOf(item) === index;
-      }).slice(0, 300);
+      logs = logApi.normalizeList(replace ? saved : saved.concat(logs), 500);
       logsLoaded = true;
-      storageSet({ popupLogs: logs });
+      var pending = pendingLogEntries.slice();
+      pendingLogEntries = [];
+      pending.forEach(persistLogEntry);
       renderLogs();
+      if (typeof callback === "function") callback(logs);
     });
   }
 
-  function renderLogs() {
-    var el = $("logText");
-    if (el) el.textContent = logs.length ? logs.join("\n") : text("\u6682\u65e0\u65e5\u5fd7\u3002");
+  function visibleLogs() {
+    var query = $("logSearchInput") ? $("logSearchInput").value : "";
+    var level = $("logLevelFilter") ? $("logLevelFilter").value : "all";
+    return logs.filter(function (record) { return logApi.matches(record, query, level); });
   }
 
-  function savePopupState() {
-    storageSet({
-      popupState: {
-        lastPanelId: lastPanelId,
-        chromeHidden: true,
-        scriptWorkspaceActive: document.body.classList.contains("script-ui-active"),
-        lastWorkspaceScript: lastWorkspaceScript
-      }
+  function appendLogDetail(host, key, value) {
+    var detail = document.createElement("span");
+    detail.className = "log-detail";
+    detail.textContent = key + "：" + value;
+    host.appendChild(detail);
+  }
+
+  function logTimeLabel(timestamp) {
+    var date = new Date(timestamp);
+    if (Number.isNaN(date.getTime())) return "--:--:--";
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  function createLogEntry(record) {
+    var labels = { error: "异常", warn: "警告", success: "成功", info: "信息" };
+    var entry = document.createElement("article");
+    var head = document.createElement("div");
+    var level = document.createElement("span");
+    var category = document.createElement("span");
+    var time = document.createElement("time");
+    var message = document.createElement("div");
+    var details = document.createElement("div");
+    entry.className = "log-entry";
+    entry.dataset.level = record.level;
+    entry.dataset.logId = record.id;
+    head.className = "log-entry-head";
+    level.className = "log-level";
+    level.textContent = labels[record.level] || "信息";
+    category.className = "log-category";
+    category.textContent = record.category;
+    time.className = "log-time";
+    time.dateTime = record.timestamp;
+    time.textContent = logTimeLabel(record.timestamp);
+    message.className = "log-message";
+    message.textContent = record.message;
+    details.className = "log-details";
+    Object.keys(record.details || {}).forEach(function (key) {
+      appendLogDetail(details, key, record.details[key]);
     });
+    head.appendChild(level);
+    head.appendChild(category);
+    head.appendChild(time);
+    entry.appendChild(head);
+    entry.appendChild(message);
+    if (details.childNodes.length) entry.appendChild(details);
+    return entry;
+  }
+
+  function renderLogs(resetScroll) {
+    var list = $("logList");
+    if (!list) return;
+    var previousTop = list.scrollTop;
+    var previousHeight = list.scrollHeight;
+    var keepAtTop = resetScroll === true || previousTop <= 4;
+    var visible = visibleLogs();
+    var fragment = document.createDocumentFragment();
+    list.textContent = "";
+    if (!visible.length) {
+      var empty = document.createElement("div");
+      empty.className = "log-empty";
+      empty.textContent = logs.length ? "没有符合搜索条件的日志" : "暂无运行日志";
+      fragment.appendChild(empty);
+    } else {
+      visible.forEach(function (record) { fragment.appendChild(createLogEntry(record)); });
+    }
+    list.appendChild(fragment);
+    if (keepAtTop) list.scrollTop = 0;
+    else list.scrollTop = Math.max(0, previousTop + list.scrollHeight - previousHeight);
+    $("logTotalCount").textContent = String(logs.length);
+    $("logErrorCount").textContent = String(logs.filter(function (record) { return record.level === "error"; }).length);
+    $("logVisibleCount").textContent = String(visible.length);
+  }
+
+  function currentPopupState() {
+    return {
+      lastPanelId: lastPanelId,
+      chromeHidden: true,
+      scriptWorkspaceActive: document.body.classList.contains("script-ui-active"),
+      lastWorkspaceScript: lastWorkspaceScript
+    };
+  }
+
+  function savePopupState(extra, callback) {
+    windowModeController.saveState(currentPopupState(), extra, callback);
   }
 
   function restorePopupStateOnOpen() {
-    storageGet(["popupState", "scriptWorkspaceActive", "lastWorkspaceScript"], function (data) {
-      var state = data && data.popupState ? data.popupState : {};
+    windowModeController.loadState(function (state, data) {
       document.body.classList.add("chrome-hidden");
-      if (state.lastPanelId) {
+      if (!panelSelectedThisOpen && state.lastPanelId) {
         lastPanelId = state.lastPanelId;
         showPanel(lastPanelId, false);
       }
@@ -280,8 +447,7 @@
       } else if (data && data.lastWorkspaceScript && data.lastWorkspaceScript.code) {
         lastWorkspaceScript = data.lastWorkspaceScript;
       }
-      var workspaceActive = state.scriptWorkspaceActive;
-      if (workspaceActive == null) workspaceActive = !!(data && data.scriptWorkspaceActive);
+      var workspaceActive = isPinnedWindow && state.scriptWorkspaceActive === true;
       if (workspaceActive && lastWorkspaceScript && lastWorkspaceScript.code) {
         showScriptWorkspaceUi(
           lastWorkspaceScript.name,
@@ -296,11 +462,13 @@
   function bindPanels() {
     document.querySelectorAll(".side-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
+        panelSelectedThisOpen = true;
         if (document.body.classList.contains("script-ui-active")) {
           showScriptManager();
         }
         document.querySelectorAll(".script-feature-btn").forEach(function (item) { item.classList.remove("active"); });
         showPanel(btn.dataset.panel, true);
+        if (btn.dataset.panel === "videoPanel") control({ type: "GET_STATUS" });
         if (btn.dataset.panel === "settingsPanel") loadPrivacySummary();
         hideScriptChromeNow();
       });
@@ -315,16 +483,27 @@
 
   function showPanel(panelId, remember) {
     if (!panelId) return;
-    if (panelId !== "logPanel" && remember) {
-      lastPanelId = panelId;
-      savePopupState();
-    }
+    var targetPanel = document.getElementById(panelId);
+    if (!targetPanel || !targetPanel.classList.contains("panel")) panelId = "videoPanel";
+    var content = document.querySelector(".content");
+    var activePanel = document.querySelector(".panel.active");
+    if (content && activePanel) panelScrollPositions[activePanel.id] = content.scrollTop;
     document.querySelectorAll(".side-btn").forEach(function (item) {
       item.classList.toggle("active", item.dataset.panel === panelId);
     });
     document.querySelectorAll(".panel").forEach(function (panel) {
       panel.classList.toggle("active", panel.id === panelId);
     });
+    document.body.classList.toggle("video-panel-active", panelId === "videoPanel");
+    lastPanelId = panelId;
+    if (remember) {
+      savePopupState();
+    }
+    if (content) {
+      requestAnimationFrame(function () {
+        content.scrollTop = Number(panelScrollPositions[panelId] || 0);
+      });
+    }
   }
 
   function enterScriptWorkspace() {
@@ -344,8 +523,7 @@
     document.body.classList.remove("script-workspace");
     document.body.classList.add("chrome-hidden");
     hideScriptChromeNow();
-    storageSet({ scriptWorkspaceActive: false });
-    savePopupState();
+    savePopupState(isPinnedWindow ? { scriptWorkspaceActive: false } : {});
   }
 
   function postScriptToWorkspace(script) {
@@ -552,16 +730,7 @@
     $("scriptRunnerTitle").textContent = lastWorkspaceScript.name;
     enterScriptWorkspace();
     document.body.classList.add("script-ui-active");
-    storageSet({
-      scriptWorkspaceActive: true,
-      lastWorkspaceScript: lastWorkspaceScript,
-      popupState: {
-        lastPanelId: lastPanelId,
-        chromeHidden: true,
-        scriptWorkspaceActive: true,
-        lastWorkspaceScript: lastWorkspaceScript
-      }
-    });
+    savePopupState(Object.assign({ lastWorkspaceScript: lastWorkspaceScript }, isPinnedWindow ? { scriptWorkspaceActive: true } : {}));
     setTimeout(function () {
       postScriptToWorkspace(lastWorkspaceScript);
     }, 80);
@@ -685,9 +854,29 @@
   function control(command) {
     var commandType = command && command.type ? command.type : "GET_STATUS";
     var startedAt = Date.now();
-    if (commandType !== "GET_STATUS") addDetailedLog("\u89c6\u9891", "\u53d1\u9001\u63a7\u5236\u547d\u4ee4", { \u547d\u4ee4: commandType });
-    setTopStatus(text("\u5904\u7406\u4e2d"));
-    return sendMessage({ action: "controlActiveTab", command: command }).then(function (res) {
+    var mediaAccess = null;
+    if (commandType !== "GET_STATUS") videoDurationRetryCount = 0;
+    if (commandType !== "GET_STATUS") addDetailedLog("\u89c6\u9891", "\u53d1\u9001\u63a7\u5236\u547d\u4ee4", {
+      \u547d\u4ee4: commandType,
+      \u76ee\u6807\u500d\u901f: command.rate || "-",
+      \u76ee\u6807\u97f3\u91cf: command.volume == null ? "-" : command.volume,
+      \u8df3\u8f6c\u79d2\u6570: command.seconds == null ? "-" : command.seconds
+    });
+    if (commandType !== "GET_STATUS") setTopStatus(text("\u5904\u7406\u4e2d"));
+    var access = commandType === "GET_STATUS"
+      ? Promise.resolve({ ok: true })
+      : getCurrentSiteAccess().then(ensureMediaAccess);
+    return access.then(function (result) {
+      mediaAccess = result || { ok: false, error: text("\u5f53\u524d\u9875\u9762\u672a\u6388\u6743") };
+      if (!mediaAccess.ok) return mediaAccess;
+      return sendMessage({ action: "controlActiveTab", command: command });
+    }).then(function (res) {
+      if (!res.ok && mediaAccess && mediaAccess.preloadRegistered) {
+        res.error = (res.error || text("\u672a\u68c0\u6d4b\u5230\u53ef\u63a7\u5236\u7684\u5a92\u4f53")) + " " + text("\u5df2\u542f\u7528\u6df1\u5ea6\u5f3a\u63a7\uff0c\u8bf7\u5237\u65b0\u89c6\u9891\u9875\u540e\u91cd\u8bd5\u3002");
+      }
+      if (!res.ok && mediaAccess && mediaAccess.mediaAccessWarning) {
+        res.error = (res.error || "") + " " + mediaAccess.mediaAccessWarning;
+      }
       updateVideoStatus(res);
       if (commandType !== "GET_STATUS" || !res.ok) {
         addDetailedLog("\u89c6\u9891", res.ok ? "\u63a7\u5236\u6210\u529f" : "\u63a7\u5236\u5931\u8d25", {
@@ -695,10 +884,23 @@
           \u8017\u65f6: (Date.now() - startedAt) + "ms",
           \u5a92\u4f53\u6570: res.mediaCount || 0,
           \u5df2\u5e94\u7528: res.applied || 0,
+          iframe\u6570: res.frameCount || 0,
+          \u5ef6\u8fdf\u6821\u9a8c: res.verifiedAfterMs ? res.verifiedAfterMs + "ms" : "-",
+          \u5b9e\u9645\u500d\u901f: res.rate || "-",
+          \u603b\u65f6\u957f: res.duration ? fmtTime(res.duration) : "\u672a\u8bfb\u53d6",
+          \u65f6\u957f\u6765\u6e90: res.durationSource || "-",
+          \u76ee\u6807\u500d\u901f: res.targetRate || command.rate || "-",
+          \u500d\u901f\u7a33\u5b9a: res.rateStable === false ? "\u5426" : "\u662f",
+          \u53cd\u68c0\u6d4b\u4f2a\u88c5: res.externalRateMasked ? "\u5df2\u542f\u7528" : "-",
+          \u500d\u901f\u5f3a\u63a7: res.rateLocked ? "\u5df2\u542f\u7528" : "\u672a\u542f\u7528",
+          \u8fde\u7eed\u64ad\u653e: res.continuousPlayback ? "\u5df2\u542f\u7528" : "\u672a\u542f\u7528",
+          \u6df1\u5ea6\u9884\u52a0\u8f7d: mediaAccess && mediaAccess.preloadRegistered ? "\u5df2\u6ce8\u518c" : "-",
+          \u7ad9\u70b9: mediaAccess && mediaAccess.originPattern || "-",
+          \u63d0\u793a: mediaAccess && mediaAccess.mediaAccessWarning || "-",
           \u539f\u56e0: res.error || "-"
         });
       }
-      setTopStatus(res.ok ? text("\u5b8c\u6210") : text("\u5931\u8d25"));
+      if (commandType !== "GET_STATUS") setTopStatus(res.ok ? text("\u5b8c\u6210") : text("\u5931\u8d25"));
       return res;
     });
   }
@@ -720,8 +922,12 @@
   }
 
   function updateVideoStatus(res) {
+    lastVideoStatus = res && res.ok ? Object.assign({}, res) : null;
     if (!res || !res.ok) {
-      ["rate", "paused", "volume", "mediaCount", "muted", "duration", "applied"].forEach(function (name) {
+      if (videoDurationRetryTimer) clearTimeout(videoDurationRetryTimer);
+      videoDurationRetryTimer = null;
+      videoDurationRetryCount = 0;
+      ["rate", "paused", "volume", "mediaCount", "duration", "applied", "continuous", "rateLocked"].forEach(function (name) {
         setStatus(name, "-");
       });
       $("videoStatusHint").textContent = text("\u5f53\u524d\u64ad\u653e\u5668\u65e0\u6cd5\u76f4\u63a5\u63a7\u5236\u3002\u539f\u56e0\uff1a") + ((res && res.error) || text("\u672a\u68c0\u6d4b\u5230\u53ef\u63a7\u5236\u7684\u5a92\u4f53"));
@@ -734,14 +940,37 @@
     setStatus("paused", res.paused ? text("\u6682\u505c") : text("\u64ad\u653e\u4e2d"));
     setStatus("volume", volumePercent + "%");
     setStatus("mediaCount", res.mediaCount || 0);
-    setStatus("muted", res.muted ? text("\u662f") : text("\u5426"));
     setStatus("duration", fmtTime(res.duration));
     setStatus("applied", res.applied || 0);
+    setStatus("continuous", res.continuousPlayback ? text("\u5df2\u5f00\u542f") : text("\u5df2\u5173\u95ed"));
+    setStatus("rateLocked", res.rateLocked ? text("\u5df2\u5f00\u542f") : text("\u5df2\u5173\u95ed"));
+    if ($("enableAutoplayBtn")) $("enableAutoplayBtn").disabled = res.continuousPlayback === true;
+    if ($("disableAutoplayBtn")) $("disableAutoplayBtn").disabled = res.continuousPlayback !== true;
     $("rateInput").value = rate.toFixed(2);
     $("volumeInput").value = volumePercent;
-    $("videoStatusHint").textContent = res.specialPlayerDetected
+    if (videoDurationRetryTimer) clearTimeout(videoDurationRetryTimer);
+    videoDurationRetryTimer = null;
+    if (Number(res.mediaCount || 0) > 0 && Number(res.duration || 0) <= 0 && videoDurationRetryCount < 4) {
+      var retryDelays = [350, 800, 1600, 3000];
+      var retryDelay = retryDelays[videoDurationRetryCount] || 3000;
+      videoDurationRetryCount += 1;
+      videoDurationRetryTimer = setTimeout(function () {
+        videoDurationRetryTimer = null;
+        var videoPanel = $("videoPanel");
+        if (videoPanel && videoPanel.classList.contains("active")) control({ type: "GET_STATUS" });
+      }, retryDelay);
+    } else if (Number(res.duration || 0) > 0) {
+      videoDurationRetryCount = 0;
+    }
+    var playerHint = res.specialPlayerDetected
       ? (res.reason || text("\u68c0\u6d4b\u5230\u7279\u6b8a\u64ad\u653e\u5668"))
       : (res.playerType ? text("\u5f53\u524d\u64ad\u653e\u5668：") + res.playerType : "");
+    $("videoStatusHint").textContent = [
+      res.rateLocked ? text("\u500d\u901f\u5f3a\u63a7\u5df2\u542f\u7528") : "",
+      res.continuousPlayback ? text("\u8fde\u7eed\u64ad\u653e\u5df2\u542f\u7528") : "",
+      playerHint,
+      Number(res.mediaCount || 0) > 0 && Number(res.duration || 0) <= 0 ? text("\u6b63\u5728\u8bfb\u53d6\u89c6\u9891\u603b\u65f6\u957f") : ""
+    ].filter(Boolean).join(" · ");
   }
 
   function loadManualCapture() {
@@ -763,6 +992,7 @@
             $("aiMode").value = "custom";
             $("aiQuestion").value = res.aiPrompt || res.ocrText;
             $("aiAnswer").value = res.aiResponse;
+            aiController.showReplyWindow(res.aiResponse);
             $("ocrStatus").textContent = text("\u5df2\u6062\u590d OCR \u7ed3\u679c\u548c AI \u56de\u590d\u3002");
             addDetailedLog("AI", "\u6062\u590d\u5df2\u4fdd\u5b58\u56de\u590d", {
               \u4efb\u52a1: captureLabel(lastCaptureTime),
@@ -788,7 +1018,7 @@
           } else if (res.ocrStatus === "empty") {
             $("ocrStatus").textContent = text("OCR \u8bc6\u522b\u5b8c\u6210\uff0c\u4f46\u672a\u8bc6\u522b\u5230\u6587\u5b57\u3002");
           } else {
-            runPanelOcr(lastCaptureDataUrl);
+            requestBackgroundOcrRetry();
           }
         }
       } else if (!res.ok) {
@@ -798,47 +1028,18 @@
     });
   }
 
-  function runPanelOcr(dataUrl) {
-    dataUrl = dataUrl || lastCaptureDataUrl;
-    if (!dataUrl || !window.winSpeedBallOcr) return Promise.resolve("");
-    var runId = ++ocrRunId;
-    var sourceTime = lastCaptureTime;
-    addDetailedLog("OCR", "\u5f00\u59cb\u8bc6\u522b", { \u4efb\u52a1: captureLabel(sourceTime) });
-    $("ocrStatus").textContent = text("\u6b63\u5728 OCR \u8bc6\u522b...");
-    return window.winSpeedBallOcr.recognize(dataUrl, function (m) {
-      if (runId !== ocrRunId) return;
-      if (m && m.status) {
-        var p = m.progress == null ? "" : " " + Math.round(m.progress * 100) + "%";
-        $("ocrStatus").textContent = "OCR: " + m.status + p;
+  function requestBackgroundOcrRetry() {
+    if (!lastCaptureDataUrl || !lastCaptureTime) return Promise.resolve({ ok: false, error: "没有可识别的截图。" });
+    $("ocrStatus").textContent = text("\u6b63\u5728\u542f\u52a8\u540e\u53f0 OCR...");
+    return sendMessage({ action: "retryManualOcr" }).then(function (result) {
+      if (!result || !result.ok) {
+        $("ocrStatus").textContent = text("OCR \u91cd\u8bd5\u5931\u8d25\uff1a") + (result && result.error || text("\u672a\u77e5\u9519\u8bef"));
+        return result;
       }
-    }).then(function (recognizedText) {
-      if (runId !== ocrRunId) return "";
-      var cleanText = recognizedText.trim();
-      if (sourceTime !== lastCaptureTime) {
-        addDetailedLog("OCR", "\u5ffd\u7565\u8fc7\u671f\u8bc6\u522b\u7ed3\u679c", { \u4efb\u52a1: captureLabel(sourceTime) });
-        return "";
-      }
-      $("ocrText").value = cleanText;
-      $("ocrStatus").textContent = text("OCR \u5b8c\u6210\u3002");
-      addDetailedLog("OCR", cleanText ? "\u8bc6\u522b\u5b8c\u6210" : "\u8bc6\u522b\u7ed3\u679c\u4e3a\u7a7a", {
-        \u4efb\u52a1: captureLabel(sourceTime),
-        \u5b57\u6570: cleanText.length
-      });
-      storageSet({
-        manualOcrText: cleanText,
-        manualOcrSourceTime: sourceTime
-      });
-      return maybeAutoSendOcrToAi(cleanText, sourceTime).then(function () {
-        return recognizedText;
-      });
-    }).catch(function (error) {
-      if (runId !== ocrRunId) return "";
-      $("ocrStatus").textContent = text("OCR \u5931\u8d25\uff1a") + (error.message || String(error));
-      addDetailedLog("OCR", "\u8bc6\u522b\u5931\u8d25", {
-        \u4efb\u52a1: captureLabel(sourceTime),
-        \u539f\u56e0: error.message || String(error)
-      });
-      return "";
+      $("ocrStatus").textContent = result.pending
+        ? text("OCR \u540e\u53f0\u8bc6\u522b\u4ecd\u5728\u8fdb\u884c\u4e2d...")
+        : text("OCR \u540e\u53f0\u8bc6\u522b\u5df2\u91cd\u65b0\u542f\u52a8\u3002");
+      return result;
     });
   }
 
@@ -1100,14 +1301,20 @@
     navZones = normalizeNavZones(zones || readNavZonesFromInputs());
     captureSelectionTone = normalizeCaptureTone(tone == null ? $("captureToneInput").value : tone);
     captureSelectionWidth = normalizeCaptureWidth(width == null ? $("captureWidthInput").value : width);
-    storageSet({ navRevealDelayMs: navRevealDelayMs, navHideDelayMs: navHideDelayMs, navTransitionMs: navTransitionMs, navRevealZones: navZones, captureSelectionTone: captureSelectionTone, captureSelectionWidth: captureSelectionWidth }, function () {
+    storageSet({ navRevealDelayMs: navRevealDelayMs, navHideDelayMs: navHideDelayMs, navTransitionMs: navTransitionMs, navRevealZones: navZones, captureSelectionTone: captureSelectionTone, captureSelectionWidth: captureSelectionWidth }, function (result) {
       if ($("navDelayInput")) $("navDelayInput").value = (navRevealDelayMs / 1000).toFixed(1);
       if ($("navHideDelayInput")) $("navHideDelayInput").value = (navHideDelayMs / 1000).toFixed(1);
       if ($("navTransitionInput")) $("navTransitionInput").value = (navTransitionMs / 1000).toFixed(2);
       applyNavTransition();
       writeNavZonesToInputs();
       renderCaptureTone();
-      if ($("uiSettingsStatus")) $("uiSettingsStatus").textContent = text("\u754c\u9762\u8bbe\u7f6e\u5df2\u4fdd\u5b58\u3002");
+      if ($("uiSettingsStatus")) $("uiSettingsStatus").textContent = result && result.ok === false ? text("界面设置保存失败。") : text("\u754c\u9762\u8bbe\u7f6e\u5df2\u4fdd\u5b58\u3002");
+      addDetailedLog("界面", result && result.ok === false ? "保存界面设置失败" : "保存界面设置成功", {
+        显示延迟: navRevealDelayMs + "ms",
+        隐藏延迟: navHideDelayMs + "ms",
+        过渡时间: navTransitionMs + "ms",
+        原因: result && result.error || "-"
+      }, result && result.ok === false ? "error" : "success");
     });
   }
 
@@ -1126,6 +1333,10 @@
     return permission.then(function (permissionResult) {
       if (!permissionResult.ok) {
         $("settingsStatus").textContent = text("保存失败：") + (permissionResult.error || text("未授权 AI 服务地址。"));
+        addDetailedLog("AI", "保存 AI 设置失败", {
+          阶段: "服务地址授权",
+          原因: permissionResult.error || "未授权 AI 服务地址"
+        }, "error");
         return permissionResult;
       }
       return sendMessage({ action: "saveAiSettings", payload: payload }).then(function (res) {
@@ -1247,6 +1458,44 @@
       $("declarationGateStatus").textContent = "正在重新加载扩展，请稍后重新打开弹窗。";
       chrome.runtime.reload();
     });
+  }
+
+  function bindDonation() {
+    var dialog = $("donationThanksDialog");
+    var closeButton = $("closeDonationThanksBtn");
+    var methodButtons = Array.from(document.querySelectorAll("[data-donation-method]"));
+    var qrFigures = Array.from(document.querySelectorAll("[data-donation-qr]"));
+
+    function selectMethod(method) {
+      methodButtons.forEach(function (button) {
+        var active = button.dataset.donationMethod === method;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", active ? "true" : "false");
+      });
+      qrFigures.forEach(function (figure) {
+        figure.classList.toggle("hidden", figure.dataset.donationQr !== method);
+      });
+    }
+
+    function closeThanks() {
+      if (dialog) dialog.classList.add("hidden");
+    }
+
+    methodButtons.forEach(function (button) {
+      button.addEventListener("click", function () { selectMethod(button.dataset.donationMethod); });
+    });
+    $("donationCompleteBtn").addEventListener("click", function () {
+      dialog.classList.remove("hidden");
+      closeButton.focus();
+    });
+    closeButton.addEventListener("click", closeThanks);
+    dialog.addEventListener("click", function (event) {
+      if (event.target === dialog) closeThanks();
+    });
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && !dialog.classList.contains("hidden")) closeThanks();
+    });
+    selectMethod("wechat");
   }
 
   function planLabel(plan) {
@@ -1379,6 +1628,13 @@
   }
 
   function bindVideo() {
+    chrome.runtime.onMessage.addListener(function (message, sender) {
+      if (!sender || sender.id !== chrome.runtime.id || !message || message.source !== "user-script-bridge" || message.type !== "WSB_SHARED_VIDEO_STATUS") return;
+      if (Object.keys(message).some(function (key) { return ["source", "type", "status"].indexOf(key) < 0; })) return;
+      var status = message.status;
+      if (!status || typeof status !== "object" || Array.isArray(status)) return;
+      updateVideoStatus(status);
+    });
     $("applyRateBtn").addEventListener("click", function () {
       var rate = Number($("rateInput").value);
       if (Number.isNaN(rate)) rate = 1;
@@ -1402,6 +1658,10 @@
     $("stepUp").addEventListener("click", function () { control({ type: "STEP_UP" }); });
     $("stepDown").addEventListener("click", function () { control({ type: "STEP_DOWN" }); });
     $("resetVideo").addEventListener("click", function () { control({ type: "RESET" }); });
+    $("playVideoBtn").addEventListener("click", function () { control({ type: "PLAY" }); });
+    $("pauseVideoBtn").addEventListener("click", function () { control({ type: "PAUSE" }); });
+    $("enableAutoplayBtn").addEventListener("click", function () { control({ type: "ENABLE_AUTOPLAY" }); });
+    $("disableAutoplayBtn").addEventListener("click", function () { control({ type: "DISABLE_AUTOPLAY" }); });
     $("muteBtn").addEventListener("click", function () { control({ type: "SET_MUTED", muted: true }); });
     $("unmuteBtn").addEventListener("click", function () { control({ type: "SET_MUTED", muted: false }); });
     $("toggleMuteBtn").addEventListener("click", function () { control({ type: "TOGGLE_MUTED" }); });
@@ -1409,6 +1669,7 @@
 
   function bindOcr() {
     $("regionCaptureBtn").addEventListener("click", startRegionCaptureFromPopup);
+    $("retryOcrBtn").addEventListener("click", requestBackgroundOcrRetry);
     chrome.storage.onChanged.addListener(function (changes, areaName) {
       if (areaName !== "local") return;
       if (changes.manualCaptureTime || changes.manualOcrText || changes.manualAiResponse) {
@@ -1494,10 +1755,14 @@
     $("captureWidthInput").addEventListener("change", saveCaptureStyle);
     $("autoSendOcrToAiInput").addEventListener("change", function () {
       autoSendOcrToAi = $("autoSendOcrToAiInput").checked;
-      storageSet({ autoSendOcrToAi: autoSendOcrToAi }, function () {
+      storageSet({ autoSendOcrToAi: autoSendOcrToAi }, function (result) {
         $("autoOcrAiStatus").textContent = autoSendOcrToAi
           ? text("\u5df2\u5f00\u542f\uff1aOCR \u7ed3\u679c\u4f1a\u81ea\u52a8\u53d1\u9001\u7ed9 AI\u3002")
           : text("\u5df2\u5173\u95ed\u81ea\u52a8\u53d1\u9001\u3002");
+        addDetailedLog("AI", result && result.ok === false ? "更新 OCR 自动发送失败" : "更新 OCR 自动发送成功", {
+          状态: autoSendOcrToAi ? "开启" : "关闭",
+          原因: result && result.error || "-"
+        }, result && result.ok === false ? "error" : "success");
         if (autoSendOcrToAi) maybeAutoSendOcrToAi($("ocrText").value, lastCaptureTime);
       });
     });
@@ -1552,10 +1817,150 @@
   }
 
   function bindLogs() {
+    var logViewButtons = Array.from(document.querySelectorAll("[data-log-view]"));
+    function selectLogView(view) {
+      logViewButtons.forEach(function (button) {
+        var active = button.dataset.logView === view;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", active ? "true" : "false");
+      });
+      $("runtimeLogView").classList.toggle("hidden", view !== "runtime");
+      $("updateLogView").classList.toggle("hidden", view !== "updates");
+    }
+    logViewButtons.forEach(function (button) {
+      button.addEventListener("click", function () { selectLogView(button.dataset.logView); });
+    });
+    selectLogView("runtime");
+
+    function setActionStatus(message) {
+      $("logActionStatus").textContent = message;
+    }
+
+    function copyText(value) {
+      if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(value);
+      return new Promise(function (resolve, reject) {
+        var area = document.createElement("textarea");
+        area.value = value;
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        try {
+          if (!document.execCommand("copy")) throw new Error("浏览器未允许复制");
+          resolve();
+        } catch (error) {
+          reject(error);
+        } finally {
+          area.remove();
+        }
+      });
+    }
+
+    var logList = $("logList");
+    var updateLogView = $("updateLogView");
+    logList.addEventListener("wheel", function (event) {
+      if (logList.scrollHeight <= logList.clientHeight) return;
+      var scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? logList.clientHeight : 1;
+      var previousTop = logList.scrollTop;
+      logList.scrollTop += event.deltaY * scale;
+      if (logList.scrollTop !== previousTop) event.preventDefault();
+    }, { passive: false });
+    logList.addEventListener("keydown", function (event) {
+      var amount = 0;
+      if (event.key === "ArrowDown") amount = 38;
+      else if (event.key === "ArrowUp") amount = -38;
+      else if (event.key === "PageDown") amount = logList.clientHeight * 0.85;
+      else if (event.key === "PageUp") amount = -logList.clientHeight * 0.85;
+      else if (event.key === "Home") logList.scrollTop = 0;
+      else if (event.key === "End") logList.scrollTop = logList.scrollHeight;
+      else return;
+      if (amount) logList.scrollTop += amount;
+      event.preventDefault();
+    });
+    updateLogView.addEventListener("wheel", function (event) {
+      if (updateLogView.scrollHeight <= updateLogView.clientHeight) return;
+      var scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? updateLogView.clientHeight : 1;
+      var previousTop = updateLogView.scrollTop;
+      updateLogView.scrollTop += event.deltaY * scale;
+      if (updateLogView.scrollTop !== previousTop) event.preventDefault();
+    }, { passive: false });
+    updateLogView.addEventListener("keydown", function (event) {
+      var amount = 0;
+      if (event.key === "ArrowDown") amount = 38;
+      else if (event.key === "ArrowUp") amount = -38;
+      else if (event.key === "PageDown") amount = updateLogView.clientHeight * 0.85;
+      else if (event.key === "PageUp") amount = -updateLogView.clientHeight * 0.85;
+      else if (event.key === "Home") updateLogView.scrollTop = 0;
+      else if (event.key === "End") updateLogView.scrollTop = updateLogView.scrollHeight;
+      else return;
+      if (amount) updateLogView.scrollTop += amount;
+      event.preventDefault();
+    });
+    $("logSearchInput").addEventListener("input", function () { renderLogs(true); });
+    $("logLevelFilter").addEventListener("change", function () { renderLogs(true); });
+    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.onChanged) {
+      chrome.storage.onChanged.addListener(function (changes, areaName) {
+        if (areaName !== "local" || !changes.popupLogs || !logsLoaded) return;
+        logs = logApi.normalizeList(changes.popupLogs.newValue, 500);
+        renderLogs(false);
+      });
+    }
+    $("refreshLogBtn").addEventListener("click", function () {
+      setActionStatus("正在刷新日志...");
+      loadLogs(true, function (items) { setActionStatus("已刷新，共 " + items.length + " 条日志"); });
+    });
+    $("copyLogBtn").addEventListener("click", function () {
+      var visible = visibleLogs();
+      if (!visible.length) {
+        setActionStatus("当前没有可复制的日志");
+        return;
+      }
+      copyText(visible.map(logApi.format).join("\n")).then(function () {
+        setActionStatus("已复制 " + visible.length + " 条当前结果");
+      }).catch(function (error) {
+        setActionStatus("复制失败：" + (error.message || String(error)));
+      });
+    });
+    $("exportLogBtn").addEventListener("click", function () {
+      var visible = visibleLogs();
+      if (!visible.length) {
+        setActionStatus("当前没有可导出的日志");
+        return;
+      }
+      var payload = {
+        exportedAt: new Date().toISOString(),
+        total: logs.length,
+        exported: visible.length,
+        filters: { query: $("logSearchInput").value, level: $("logLevelFilter").value },
+        records: visible
+      };
+      var blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+      var url = URL.createObjectURL(blob);
+      var link = document.createElement("a");
+      link.href = url;
+      link.download = "winspeedball-logs-" + new Date().toISOString().slice(0, 10) + ".json";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+      setActionStatus("已导出 " + visible.length + " 条当前结果");
+    });
     $("clearLogBtn").addEventListener("click", function () {
-      logs = [];
-      storageSet({ popupLogs: [] });
-      renderLogs();
+      if (!logs.length) {
+        setActionStatus("当前没有需要清空的日志");
+        return;
+      }
+      if (!window.confirm("确定清空全部运行日志吗？清空后无法恢复。")) return;
+      rawSendMessage({ action: "clearPopupLogs" }).then(function (response) {
+        if (!response || response.ok === false) {
+          setActionStatus("日志清空失败：" + (response && response.error || "未知错误"));
+          return;
+        }
+        logs = [];
+        pendingLogEntries = [];
+        renderLogs();
+        setActionStatus("全部日志已清空");
+      });
     });
   }
 
@@ -1761,7 +2166,13 @@
     input.dataset.permissionSignature = signature;
     updateScriptMeta(input);
     return new Promise(function (resolve) {
-      saveScriptRows(function () { resolve({ ok: true, meta: meta }); });
+      saveScriptRows(function (result) {
+        if (result && result.ok === false) {
+          resolve({ ok: false, error: text("\u811a\u672c\u6743\u9650\u4fdd\u5b58\u5931\u8d25\uff1a") + (result.error || text("\u672a\u77e5\u9519\u8bef")) });
+          return;
+        }
+        resolve({ ok: true, meta: meta });
+      });
     });
   }
 
@@ -1796,18 +2207,31 @@
     return confirmInputPermissions(input).then(function (permissionResult) {
       if (!permissionResult.ok) return permissionResult;
       if (!userScriptsAvailable) return { ok: false, code: "USER_SCRIPTS_DISABLED", error: userScriptsEnableInstruction() };
-      if (openWorkspace) showScriptWorkspaceUi(script.name, script.code, true, permissionSignature(permissionResult.meta));
+      var currentScript = {
+        id: String(input.dataset.scriptId || ""),
+        name: input.dataset.scriptName || input.value || script.name || text("\u672a\u547d\u540d\u811a\u672c"),
+        code: String(input.dataset.scriptCode || ""),
+        meta: safeParseJson(input.dataset.scriptMeta || "{}", permissionResult.meta)
+      };
+      var currentValidation = validateScriptMeta(currentScript.meta);
+      if (!currentScript.id || !currentScript.code.trim() || !currentValidation.ok) {
+        return { ok: false, error: currentValidation.error || text("\u5f53\u524d\u811a\u672c\u5185\u5bb9\u65e0\u6548\uff0c\u8bf7\u91cd\u65b0\u5bfc\u5165\u3002") };
+      }
+      if (permissionSignature(currentScript.meta) !== permissionSignature(permissionResult.meta)) {
+        return { ok: false, error: text("\u811a\u672c\u6743\u9650\u521a\u521a\u53d1\u751f\u53d8\u5316\uff0c\u8bf7\u91cd\u65b0\u786e\u8ba4\u3002") };
+      }
+      if (openWorkspace) showScriptWorkspaceUi(currentScript.name, currentScript.code, true, permissionSignature(currentScript.meta));
       var startedAt = Date.now();
       addDetailedLog("\u811a\u672c", "\u5f00\u59cb\u6267\u884c", {
-        \u540d\u79f0: script.name || "\u672a\u547d\u540d",
-        \u5c5e\u6027: permissionResult.meta.property || "-",
-        \u6743\u9650: permissionSignature(permissionResult.meta)
+        \u540d\u79f0: currentScript.name,
+        \u5c5e\u6027: currentScript.meta.property || "-",
+        \u6743\u9650: permissionSignature(currentScript.meta)
       });
       return sendMessage({
         action: "executeUserScript",
-        scriptId: input.dataset.scriptId,
-        code: script.code,
-        permissions: permissionResult.meta.permissions,
+        scriptId: currentScript.id,
+        code: currentScript.code,
+        permissions: currentScript.meta.permissions,
         permissionConfirmed: true
       }).then(function (res) {
         if (res.ok) {
@@ -1816,7 +2240,7 @@
           saveScriptRows();
         }
       addDetailedLog("\u811a\u672c", res.ok ? "\u6267\u884c\u6210\u529f" : "\u6267\u884c\u5931\u8d25", {
-        \u540d\u79f0: script.name || "\u672a\u547d\u540d",
+        \u540d\u79f0: currentScript.name,
         \u8017\u65f6: (Date.now() - startedAt) + "ms",
         \u539f\u56e0: res.error || "-"
       });
@@ -1834,21 +2258,103 @@
     var group = document.createElement("div");
     var title = document.createElement("div");
     var actions = document.createElement("div");
+    var detail = document.createElement("div");
     group.className = "script-feature-group";
+    if (scripts.some(function (script) { return /@wsb-card\s+duration-next\b/i.test(String(script.code || "")); })) {
+      group.classList.add("duration-next-card");
+    }
     title.className = "script-feature-title";
     title.textContent = text("\u811a\u672c\u529f\u80fd");
     actions.className = "script-feature-actions";
+    detail.className = "script-feature-detail";
+    detail.hidden = true;
+
+    function renderDetail(script, phase, result) {
+      var meta = script.meta || parseUserScriptMeta(script.code);
+      var isDurationNext = /@wsb-card\s+duration-next\b/i.test(String(script.code || ""));
+      var videoStatus = lastVideoStatus || {};
+      var values = isDurationNext ? [
+        ["插件总时长", Number(videoStatus.duration || 0) > 0 ? fmtTime(videoStatus.duration) : "未获取"],
+        ["当前时间", Number(videoStatus.currentTime || 0) > 0 ? fmtTime(videoStatus.currentTime) : "0:00"],
+        ["读取方式", "WSB.video.getStatus"],
+        ["无总时长", "8 秒后下一节"]
+      ] : [
+        ["版本", meta.version || "-"],
+        ["权限", permissionSignature(meta) || "-"],
+        ["网站授权", (script.grantedOrigins || []).length + " 个"],
+        ["执行时间", phase === "idle" ? "未运行" : phase === "running" ? "处理中" : new Date().toLocaleTimeString()]
+      ];
+      detail.textContent = "";
+      detail.hidden = false;
+      var head = document.createElement("div");
+      var name = document.createElement("strong");
+      var state = document.createElement("span");
+      var grid = document.createElement("div");
+      var message = document.createElement("div");
+      head.className = "script-feature-detail-head";
+      name.className = "script-feature-detail-name";
+      state.className = "script-feature-detail-state " + (phase === "success" ? "success" : phase === "error" ? "error" : "");
+      grid.className = "script-feature-detail-grid";
+      message.className = "script-feature-detail-message";
+      name.textContent = script.name || "未命名脚本";
+      state.textContent = phase === "idle" ? "等待启动" : phase === "running" ? "正在启动" : phase === "success" ? "已启动" : "启动失败";
+      message.textContent = isDurationNext
+        ? (phase === "idle"
+          ? "总时长由插件视频模块提供；脚本不会每秒扫描网页。"
+          : phase === "running"
+            ? "正在启动并读取一次插件视频状态。"
+            : phase === "success"
+              ? "自动下一节已启动。切换课程后会再次读取一次插件状态。"
+              : (result && result.error || "脚本未能启动，请检查插件权限和当前页面。"))
+        : (phase === "idle"
+          ? "点击上方脚本按钮启动该功能。"
+          : phase === "running"
+            ? "正在检查权限并把脚本注入当前网页。"
+            : phase === "success"
+              ? "脚本已注入当前网页。"
+              : (result && result.error || "脚本未能启动，请检查权限和当前页面。"));
+      values.forEach(function (entry) {
+        var item = document.createElement("div");
+        var label = document.createElement("span");
+        var value = document.createElement("span");
+        item.className = "script-feature-detail-item";
+        label.className = "script-feature-detail-label";
+        value.className = "script-feature-detail-value";
+        label.textContent = entry[0];
+        value.textContent = entry[1];
+        item.appendChild(label);
+        item.appendChild(value);
+        grid.appendChild(item);
+      });
+      head.appendChild(name);
+      head.appendChild(state);
+      detail.appendChild(head);
+      detail.appendChild(grid);
+      detail.appendChild(message);
+    }
+
     scripts.forEach(function (script) {
       var button = document.createElement("button");
+      var isDurationNext = /@wsb-card\s+duration-next\b/i.test(String(script.code || ""));
       button.type = "button";
       button.className = "script-feature-action";
-      button.textContent = script.name;
-      button.addEventListener("click", function () { executeScriptFeature(script, false); });
+      button.textContent = isDurationNext ? "启动自动下一节" : script.name;
+      button.addEventListener("click", function () {
+        actions.querySelectorAll(".script-feature-action").forEach(function (item) { item.classList.toggle("active", item === button); });
+        renderDetail(script, "running", null);
+        executeScriptFeature(script, false).then(function (result) {
+          renderDetail(script, result && result.ok ? "success" : "error", result);
+        }).catch(function (error) {
+          renderDetail(script, "error", { error: error && error.message || String(error) });
+        });
+      });
       actions.appendChild(button);
     });
     group.appendChild(title);
     group.appendChild(actions);
+    group.appendChild(detail);
     host.appendChild(group);
+    if (scripts[0]) renderDetail(scripts[0], "idle", null);
   }
 
   function renderScriptFeatures(scripts) {
@@ -1924,11 +2430,16 @@
   function saveScriptRows(callback) {
     var scripts = getSavedScriptRows();
     renderScriptFeatures(scripts);
-    storageSet({ userScripts: scripts }, function () {
-      if (chrome.runtime.lastError) {
-        $("scriptStatus").textContent = text("\u811a\u672c\u4fdd\u5b58\u5931\u8d25\uff1a") + chrome.runtime.lastError.message;
+    storageSet({ userScripts: scripts }, function (result) {
+      if (result && result.ok === false) {
+        $("scriptStatus").textContent = text("\u811a\u672c\u4fdd\u5b58\u5931\u8d25\uff1a") + (result.error || text("未知错误"));
       }
-      if (typeof callback === "function") callback();
+      addDetailedLog("脚本", result && result.ok === false ? "保存脚本配置失败" : "保存脚本配置成功", {
+        脚本数量: scripts.length,
+        已启用: scripts.filter(function (script) { return script && script.enabled !== false; }).length,
+        原因: result && result.error || "-"
+      }, result && result.ok === false ? "error" : "success");
+      if (typeof callback === "function") callback(result || { ok: true });
     });
   }
 
@@ -2377,8 +2888,9 @@
     loadScriptRows();
   }
 
+  bindComprehensiveActionLogging();
   bindPanels();
-  bindPinnedWindow();
+  windowModeController.bindPinButton($("pinWindowBtn"));
   bindScriptWorkspaceNav();
   bindVideo();
   bindOcr();
@@ -2386,6 +2898,7 @@
   bindBook();
   bindAccount();
   bindDeclaration();
+  bindDonation();
   bindSettings();
   bindPrivacyCenter();
   developerController.bind();

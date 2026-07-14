@@ -217,6 +217,9 @@
           提示词字数: prompt.length
         });
         callAiWhenAvailable({ prompt: prompt, autoOcrSourceTime: sourceTime }, sourceTime, function (result) {
+          if (result && result.ok && typeof global.WinSpeedBallShowAiReplyWindow === "function") {
+            global.WinSpeedBallShowAiReplyWindow({ content: result.content }, function () {});
+          }
           storage.get(["manualCaptureTime", "ocrCancelledSourceTime"], function (current) {
             if (Number(current.manualCaptureTime || 0) !== sourceTime || Number(current.ocrCancelledSourceTime || 0) === sourceTime) return;
             storage.set({
@@ -274,6 +277,32 @@
     });
   }
 
+  function restartLatest() {
+    return storage.getLatestCapture().then(function (capture) {
+      var sourceTime = Number(capture && capture.sourceTime || 0);
+      if (!capture || !capture.dataUrl || !sourceTime) {
+        return { ok: false, error: "No captured image is available for OCR." };
+      }
+      return new Promise(function (resolve) {
+        storage.get(["manualCaptureTime", "ocrJobSourceTime", "ocrJobStatus"], function (data) {
+          if (Number(data.manualCaptureTime || 0) !== sourceTime) {
+            resolve({ ok: false, error: "The latest capture changed before OCR could restart." });
+            return;
+          }
+          var currentStatus = String(data.ocrJobStatus || "");
+          if (activeSourceTime === sourceTime && /^(queued|loading|recognizing)$/.test(currentStatus)) {
+            resolve({ ok: true, pending: true, sourceTime: sourceTime, status: currentStatus });
+            return;
+          }
+          start(capture.dataUrl, sourceTime);
+          resolve({ ok: true, restarted: true, sourceTime: sourceTime, status: "queued" });
+        });
+      });
+    }).catch(function (error) {
+      return { ok: false, error: error && error.message || String(error || "Could not restart OCR.") };
+    });
+  }
+
   function getManualCapture(callback) {
     storage.getLatestCapture().then(function (capture) {
       storage.get([
@@ -311,6 +340,7 @@
     cancel: cancel,
     closeOffscreen: closeOffscreen,
     resume: resume,
+    restartLatest: restartLatest,
     getManualCapture: getManualCapture,
     buildAutoPrompt: buildAutoPrompt
   };

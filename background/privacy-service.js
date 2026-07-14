@@ -7,11 +7,12 @@
     "manualCaptureDataUrl", "manualCaptureTime",
     "manualOcrText", "manualOcrSourceTime", "ocrJobSourceTime", "ocrJobStatus", "ocrJobProgress", "ocrJobStage", "ocrJobError", "ocrJobUpdatedAt",
     "aiQuestionHistory", "manualAiSourceTime", "manualAiPrompt", "manualAiResponse", "aiJobSourceTime", "aiJobStatus", "aiJobError", "aiJobUpdatedAt",
-    "popupLogs", "userScripts", "developerSdkDraft", "developerSdkDrafts", "developerActiveDraftId", "sdkScriptStorage", "sdkPermissionGrants", "lastWorkspaceScript", "scriptWorkspaceActive", "popupState",
+    "popupLogs", "userScripts", "developerSdkDraft", "developerSdkDrafts", "developerActiveDraftId", "sdkScriptStorage", "sdkPermissionGrants", "lastWorkspaceScript", "scriptWorkspaceActive", "popupState", "popupStateBrowser", "popupStatePinned",
     "localUserAccounts", "activeUserProviderId", "usageDeclarationAcceptance", "usageDeclarationHistory"
   ];
   var OCR_KEYS = ["manualOcrText", "manualOcrSourceTime", "ocrJobSourceTime", "ocrJobStatus", "ocrJobProgress", "ocrJobStage", "ocrJobError", "ocrJobUpdatedAt"];
   var AI_KEYS = ["aiQuestionHistory", "manualAiSourceTime", "manualAiPrompt", "manualAiResponse", "aiJobSourceTime", "aiJobStatus", "aiJobError", "aiJobUpdatedAt"];
+  var POPUP_STATE_KEYS = ["popupState", "popupStateBrowser", "popupStatePinned"];
 
   function getLocal() {
     return new Promise(function (resolve) { storage.get(LOCAL_KEYS, resolve); });
@@ -43,13 +44,15 @@
 
   function clearScriptData() {
     return getLocal().then(function (data) {
-      var popupState = data && data.popupState;
-      var updateState = Promise.resolve();
-      if (popupState && typeof popupState === "object") {
+      var statePatch = {};
+      POPUP_STATE_KEYS.forEach(function (key) {
+        var popupState = data && data[key];
+        if (!popupState || typeof popupState !== "object") return;
         var sanitized = Object.assign({}, popupState, { scriptWorkspaceActive: false });
         delete sanitized.lastWorkspaceScript;
-        updateState = setLocal({ popupState: sanitized });
-      }
+        statePatch[key] = sanitized;
+      });
+      var updateState = Object.keys(statePatch).length ? setLocal(statePatch) : Promise.resolve();
       return updateState.then(function () {
         return removeLocal(["userScripts", "developerSdkDraft", "developerSdkDrafts", "developerActiveDraftId", "sdkScriptStorage", "sdkPermissionGrants", "lastWorkspaceScript", "scriptWorkspaceActive"]);
       }).then(clearSdkSessionData);
@@ -116,7 +119,9 @@
       scriptCount += sdkDraftCount;
       if (!scriptCount && data.sdkScriptStorage && typeof data.sdkScriptStorage === "object") scriptCount = Object.keys(data.sdkScriptStorage).length;
       if (!scriptCount && data.sdkPermissionGrants && typeof data.sdkPermissionGrants === "object") scriptCount = Object.keys(data.sdkPermissionGrants).length;
-      if (!scriptCount && (data.lastWorkspaceScript && data.lastWorkspaceScript.code || data.popupState && data.popupState.lastWorkspaceScript && data.popupState.lastWorkspaceScript.code)) scriptCount = 1;
+      if (!scriptCount && (data.lastWorkspaceScript && data.lastWorkspaceScript.code || POPUP_STATE_KEYS.some(function (key) {
+        return data[key] && data[key].lastWorkspaceScript && data[key].lastWorkspaceScript.code;
+      }))) scriptCount = 1;
       return {
         ok: true,
         localOnly: true,
@@ -136,7 +141,7 @@
     if (category === "screenshots") return storage.deleteCaptureRecord().then(clearCaptureSessionData);
     if (category === "ocr") return removeLocal(OCR_KEYS);
     if (category === "ai") return removeLocal(AI_KEYS);
-    if (category === "logs") return removeLocal(["popupLogs"]);
+    if (category === "logs") return typeof storage.clearLogs === "function" ? storage.clearLogs() : removeLocal(["popupLogs"]);
     if (category === "scripts") return clearScriptData();
     if (category === "account") {
       return removeLocal(["localUserAccounts", "activeUserProviderId", "usageDeclarationAcceptance", "usageDeclarationHistory"]).then(clearSession);
