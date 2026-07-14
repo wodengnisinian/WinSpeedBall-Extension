@@ -1,3 +1,6 @@
+-如有 Bug 或其他问题，可使用邮箱联系作者。或者，如果您愿意参与这个项目的制作，作者诚恳地向您发出邀约。感谢您的一丝偶然想法，让这个项目更加完美。
+作者邮箱 / Email：zbdwxb57531@qq.com
+
 # WinSpeedBall Extension
 
 面向 Microsoft Edge 和 Chromium 浏览器的学习辅助扩展，提供视频控制、区域截图 OCR、可配置 AI 学习辅助、图书翻页和本地用户脚本功能。
