@@ -30,6 +30,10 @@ test("release metadata identifies the 3.7.0 Developer Beta", () => {
   assert.equal(manifest.version_name, "3.7.0 Developer Beta");
   assert.match(read("README.md"), /当前发布版本：WinSpeedBall `3\.7\.0 Developer Beta`/);
   assert.match(read("README.md"), /内置 SDK 版本：`3\.7\.0-beta`/);
+  assert.match(read("README.md"), /## 3\.6\.0 与 3\.7\.0 版本区别/);
+  assert.match(read("README.md"), /## 3\.7\.0 更新项目/);
+  assert.match(read("README.md"), /`book\.read`、`qa\.read`、`ai\.read`/);
+  assert.match(read("README.md"), /256 KiB 提升至 5 MiB/);
   assert.match(read("docs/user-guide-and-script-api.md"), /3\.7\.0 Developer Beta/);
   assert.match(read("CHANGELOG.md"), /## 3\.7\.0 Developer Beta - 2026-07-17/);
 });
