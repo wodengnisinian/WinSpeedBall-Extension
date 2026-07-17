@@ -7,33 +7,44 @@ const root = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
 
 test("Developer Mode 页面完整接入草稿、会话和真实 API 测试", () => {
-  const html = read("popup.html");
+  const html = read("popup/index.html");
   for (const id of [
-    "developerDraftSelect", "newDeveloperDraftBtn", "importDeveloperDraftBtn",
+    "developerDraftSelect", "newDeveloperDraftBtn", "duplicateDeveloperDraftBtn", "importDeveloperDraftBtn",
     "exportDeveloperDraftBtn", "deleteDeveloperDraftBtn", "developerScriptEditor",
     "startDeveloperSessionBtn", "stopDeveloperSessionBtn", "developerApiMethod",
-    "runDeveloperApiTestBtn", "developerSessionStatus"
+    "runDeveloperApiTestBtn", "developerSessionStatus", "developerLineCount",
+    "developerCharacterCount", "developerDeclaredCapabilityCount", "developerSaveState",
+    "developerApiCapability"
   ]) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
   const ids = Array.from(html.matchAll(/\bid="([^"]+)"/g), (match) => match[1]);
-  assert.equal(new Set(ids).size, ids.length, "popup.html 不应出现重复 ID");
+  assert.equal(new Set(ids).size, ids.length, "popup/index.html 不应出现重复 ID");
   assert.doesNotMatch(html, /当前不会执行 SDK 脚本/);
   assert.match(html, /脚本只在受限沙箱中运行/);
+  assert.match(html, /Ctrl\+S 保存当前草稿/);
+  const controller = read("popup/developer-controller.js");
+  assert.match(controller, /function updateEditorStats\(\)/);
+  assert.match(controller, /draftStore\.duplicateDraft\(draftId\)/);
+  assert.match(controller, /event\.preventDefault\(\);\s*saveDraft\(\);/);
+  assert.match(controller, /function updateApiCapabilityPreview\(\)/);
+  assert.match(controller, /contracts\.PUBLIC_METHODS/);
+  assert.match(controller, /title\.textContent = "WSB\." \+ publicMethod/);
+  assert.match(controller, /option\.textContent = publicMethod/);
 });
 
 test("SDK 运行依赖按顺序加载且后台动作均已注册", () => {
-  const html = read("popup.html");
-  const protocolIndex = html.indexOf('src="sdk/session-protocol.js"');
-  const storeIndex = html.indexOf('src="popup/developer-draft-store.js"');
-  const sessionIndex = html.indexOf('src="popup/sdk-session-controller.js"');
-  const controllerIndex = html.indexOf('src="popup/developer-controller.js"');
-  const popupIndex = html.indexOf('src="popup.js"');
+  const html = read("popup/index.html");
+  const protocolIndex = html.indexOf('src="../sdk/session-protocol.js"');
+  const storeIndex = html.indexOf('src="developer-draft-store.js"');
+  const sessionIndex = html.indexOf('src="sdk-session-controller.js"');
+  const controllerIndex = html.indexOf('src="developer-controller.js"');
+  const popupIndex = html.indexOf('src="index.js"');
   assert.ok(protocolIndex >= 0 && protocolIndex < sessionIndex);
   assert.ok(storeIndex >= 0 && storeIndex < sessionIndex);
   assert.ok(sessionIndex < controllerIndex && controllerIndex < popupIndex);
 
-  const background = read("background.js");
+  const background = read("background/service-worker.js");
   for (const action of ["prepareSdkSession", "invokeSdkSession", "getSdkSessionStatus", "closeSdkSession"]) {
     assert.match(background, new RegExp(`${action}:\\s*function`));
   }

@@ -58,6 +58,7 @@ function buildWindowService() {
           createCount += 1;
           const created = {
             id: nextId++, type: data.type, url: data.url, focused: data.focused,
+            state: data.state || "normal",
             width: data.width, height: data.height, left: data.left, top: data.top,
             tabs: [{ url: data.url }]
           };
@@ -103,7 +104,7 @@ test("固定按钮首次创建独立 popup 窗口", async () => {
   assert.equal(fixture.counts().createCount, 1);
   const created = fixture.windows.get(result.windowId);
   assert.equal(created.type, "popup");
-  assert.equal(created.url, "chrome-extension://extension-id/popup.html?pinned=1");
+  assert.equal(created.url, "chrome-extension://extension-id/popup/index.html?pinned=1");
   assert.equal(created.width, 320);
   assert.equal(created.height, 340);
   assert.equal(fixture.sessionData.pinnedPopupWindowId, result.windowId);
@@ -113,11 +114,28 @@ test("固定按钮首次创建独立 popup 窗口", async () => {
 test("重复固定会聚焦已有窗口而不重复创建", async () => {
   const fixture = buildWindowService();
   const first = await fixture.service.openPinnedWindow();
+  Object.assign(fixture.windows.get(first.windowId), { width: 640, height: 720 });
   const second = await fixture.service.openPinnedWindow();
   assert.equal(second.ok, true);
   assert.equal(second.reused, true);
   assert.equal(second.windowId, first.windowId);
   assert.deepEqual(fixture.counts(), { createCount: 1, updateCount: 1 });
+  assert.deepEqual(
+    { width: fixture.windows.get(first.windowId).width, height: fixture.windows.get(first.windowId).height },
+    { width: 320, height: 340 }
+  );
+});
+
+test("重新打开被最大化的固定窗口会恢复正常状态和固定尺寸", async () => {
+  const fixture = buildWindowService();
+  const first = await fixture.service.openPinnedWindow();
+  Object.assign(fixture.windows.get(first.windowId), { state: "maximized", width: 1280, height: 720 });
+  const reopened = await fixture.service.openPinnedWindow();
+  const restored = fixture.windows.get(reopened.windowId);
+  assert.equal(restored.state, "normal");
+  assert.equal(restored.width, 320);
+  assert.equal(restored.height, 340);
+  assert.deepEqual(fixture.counts(), { createCount: 1, updateCount: 2 });
 });
 
 test("固定窗口关闭后会清除会话记录", async () => {
@@ -190,12 +208,12 @@ test("消息 Schema 允许固定窗口页面但拒绝其他扩展页面", () => 
   };
   const pinned = context.self.WinSpeedBallMessageSchema.parse(message, {
     id: "extension-id",
-    url: "chrome-extension://extension-id/popup.html?pinned=1"
+    url: "chrome-extension://extension-id/popup/index.html?pinned=1"
   });
   assert.equal(pinned.ok, true);
   const other = context.self.WinSpeedBallMessageSchema.parse(message, {
     id: "extension-id",
-    url: "chrome-extension://extension-id/script_workspace.html"
+    url: "chrome-extension://extension-id/workspace/index.html"
   });
   assert.equal(other.ok, false);
 });

@@ -14,6 +14,9 @@ function buildPrivacyService() {
     ocrJobSourceTime: 100,
     ocrJobStatus: "completed",
     aiQuestionHistory: [{ id: 1 }, { id: 2 }],
+    aiQuestionHistoryByProvider: { deepseek: [{ id: 1 }], openai: [{ id: 2 }] },
+    aiProviderWorkspaces: { deepseek: { mode: "custom", question: "q", answer: "a" } },
+    aiSelectedProvider: "deepseek",
     manualAiSourceTime: 100,
     manualAiPrompt: "prompt",
     manualAiResponse: "answer",
@@ -93,6 +96,17 @@ test("分类清理 OCR 不影响截图、AI 和账户", async () => {
   assert.equal(fixture.localData.localUserAccounts.length, 1);
 });
 
+test("分类清理 AI 会删除各 Provider 的工作区和历史", async () => {
+  const fixture = buildPrivacyService();
+  const result = await fixture.service.clear("ai");
+  assert.equal(result.ok, true);
+  assert.equal(fixture.localData.aiQuestionHistory, undefined);
+  assert.equal(fixture.localData.aiQuestionHistoryByProvider, undefined);
+  assert.equal(fixture.localData.aiProviderWorkspaces, undefined);
+  assert.equal(fixture.localData.aiSelectedProvider, undefined);
+  assert.equal(fixture.localData.manualAiResponse, undefined);
+});
+
 test("脚本清理会同时删除 Developer 草稿和工作区缓存", async () => {
   const fixture = buildPrivacyService();
   fixture.localData.developerSdkDraft = { code: "sdk draft" };
@@ -157,7 +171,7 @@ test("隐私中心消息要求受信弹窗和明确确认", () => {
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(root, "background/message-schema.js"), "utf8"), context);
   const schema = context.self.WinSpeedBallMessageSchema;
-  const sender = { id: "extension-id", url: "chrome-extension://extension-id/popup.html" };
+  const sender = { id: "extension-id", url: "chrome-extension://extension-id/popup/index.html" };
   const valid = schema.parse({ version: 1, action: "clearPrivacyData", source: "popup", requestId: "privacy-clear-123", payload: { category: "logs", confirmed: true } }, sender);
   assert.equal(valid.ok, true);
   const unconfirmed = schema.parse({ version: 1, action: "clearPrivacyData", source: "popup", requestId: "privacy-clear-124", payload: { category: "logs", confirmed: false } }, sender);

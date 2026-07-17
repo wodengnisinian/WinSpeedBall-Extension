@@ -1,7 +1,7 @@
 (function (global) {
   "use strict";
 
-  var OCR_OFFSCREEN_PATH = "ocr_worker.html";
+  var OCR_OFFSCREEN_PATH = "ocr/offscreen.html";
   var offscreenCreating = null;
   var lastProgress = { sourceTime: 0, status: "", percent: -1 };
   var requestSequence = 0;
@@ -10,12 +10,19 @@
   var ai = global.WinSpeedBallAiService;
   var featureGate = global.WinSpeedBallFeatureGate;
 
+  function normalizeText(value) {
+    var normalizer = global.WinSpeedBallTextNormalizer;
+    return normalizer && typeof normalizer.normalize === "function"
+      ? normalizer.normalize(value || "")
+      : String(value || "").trim();
+  }
+
   function lastErrorMessage() {
     return chrome.runtime.lastError ? chrome.runtime.lastError.message : "";
   }
 
   function isWorkerSender(sender) {
-    return !!(sender && sender.url === chrome.runtime.getURL(OCR_OFFSCREEN_PATH));
+    return !!(sender && !sender.tab && sender.url === chrome.runtime.getURL(OCR_OFFSCREEN_PATH));
   }
 
   function ensureOffscreen() {
@@ -28,8 +35,8 @@
       if (contexts && contexts.length) return;
       return chrome.offscreen.createDocument({
         url: OCR_OFFSCREEN_PATH,
-        reasons: ["WORKERS"],
-        justification: "Run the local Tesseract worker after a region capture while the popup is closed."
+        reasons: ["WORKERS", "USER_MEDIA"],
+        justification: "Run local OCR and capture tab audio for local speech recognition while the popup is closed."
       });
     }).then(function () {
       offscreenCreating = null;
@@ -40,7 +47,22 @@
     return offscreenCreating;
   }
 
-  function closeOffscreen() {
+  function closeOffscreen(completedTask) {
+    completedTask = String(completedTask || "");
+    return new Promise(function (resolve) {
+      storage.get(["ocrJobStatus", "voiceJobStatus"], function (data) {
+        var ocrActive = /^(queued|loading|recognizing)$/.test(String(data.ocrJobStatus || ""));
+        var voiceActive = /^(starting|recording|loading|transcribing)$/.test(String(data.voiceJobStatus || ""));
+        if ((completedTask !== "ocr" && ocrActive) || (completedTask !== "voice" && voiceActive)) {
+          resolve({ ok: true, closed: false, busy: true });
+          return;
+        }
+        closeOffscreenNow().then(resolve);
+      });
+    });
+  }
+
+  function closeOffscreenNow() {
     var pending = offscreenCreating || Promise.resolve();
     return pending.catch(function () {}).then(function () {
       offscreenCreating = null;
@@ -61,7 +83,7 @@
       if (activeSourceTime && activeSourceTime !== sourceTime) return;
       if (Number(data.ocrJobSourceTime || 0) !== sourceTime) return;
       activeSourceTime = 0;
-      closeOffscreen();
+      closeOffscreen("ocr");
     });
   }
 
@@ -71,7 +93,7 @@
         var sourceTime = Number(data.manualCaptureTime || activeSourceTime || 0);
         activeSourceTime = 0;
         storage.set({ ocrCancelledSourceTime: sourceTime }, function () {
-          closeOffscreen().then(resolve);
+          closeOffscreen("ocr").then(resolve);
         });
       });
     });
@@ -173,7 +195,7 @@
 
   function handleComplete(request) {
     var sourceTime = Number(request.sourceTime || 0);
-    var recognizedText = String(request.text || "").trim();
+    var recognizedText = normalizeText(request.text);
     storage.get(["manualCaptureTime", "ocrCancelledSourceTime", "manualAiSourceTime", "manualAiResponse", "autoSendOcrToAi", "autoOcrPromptTemplate"], function (data) {
       if (!sourceTime || Number(data.manualCaptureTime || 0) !== sourceTime || Number(data.ocrCancelledSourceTime || 0) === sourceTime) {
         storage.appendLog("OCR", "忽略过期识别结果", { 任务: "#" + String(sourceTime).slice(-8) });
@@ -314,14 +336,14 @@
           ok: true,
           dataUrl: capture && capture.dataUrl || "",
           time: sourceTime,
-          ocrText: Number(data.manualOcrSourceTime || 0) === sourceTime ? data.manualOcrText || "" : "",
+          ocrText: Number(data.manualOcrSourceTime || 0) === sourceTime ? normalizeText(data.manualOcrText) : "",
           ocrStatus: Number(data.ocrJobSourceTime || 0) === sourceTime ? data.ocrJobStatus || "" : "",
           ocrProgress: Number(data.ocrJobSourceTime || 0) === sourceTime ? Number(data.ocrJobProgress || 0) : 0,
           ocrStage: Number(data.ocrJobSourceTime || 0) === sourceTime ? data.ocrJobStage || "" : "",
           ocrError: Number(data.ocrJobSourceTime || 0) === sourceTime ? data.ocrJobError || "" : "",
           aiSourceTime: data.manualAiSourceTime || 0,
-          aiPrompt: Number(data.manualAiSourceTime || 0) === sourceTime ? data.manualAiPrompt || "" : "",
-          aiResponse: Number(data.manualAiSourceTime || 0) === sourceTime ? data.manualAiResponse || "" : "",
+          aiPrompt: Number(data.manualAiSourceTime || 0) === sourceTime ? normalizeText(data.manualAiPrompt) : "",
+          aiResponse: Number(data.manualAiSourceTime || 0) === sourceTime ? normalizeText(data.manualAiResponse) : "",
           aiStatus: Number(data.aiJobSourceTime || 0) === sourceTime ? data.aiJobStatus || "" : "",
           aiError: Number(data.aiJobSourceTime || 0) === sourceTime ? data.aiJobError || "" : ""
         });
@@ -333,6 +355,7 @@
 
   global.WinSpeedBallOcrService = {
     isWorkerSender: isWorkerSender,
+    ensureOffscreen: ensureOffscreen,
     start: start,
     handleProgress: handleProgress,
     handleComplete: handleComplete,

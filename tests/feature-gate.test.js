@@ -29,7 +29,7 @@ function buildFeatureGate(plan) {
   };
 }
 
-test("3.4.1 已登记能力全部放行", async () => {
+test("3.7.0 已登记能力全部放行", async () => {
   const fixture = buildFeatureGate("free");
   for (const feature of ["video.basic", "ocr.basic", "ai.basic", "ai.summary", "sdk.developer", "cloud.sync"]) {
     assert.equal(await fixture.gate.canUse(feature), true, feature);
@@ -71,7 +71,7 @@ test("FeatureGate 消息动作只允许弹窗并校验能力名", () => {
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(root, "background/message-schema.js"), "utf8"), context);
   const schema = context.self.WinSpeedBallMessageSchema;
-  const sender = { id: "extension-id", url: "chrome-extension://extension-id/popup.html" };
+  const sender = { id: "extension-id", url: "chrome-extension://extension-id/popup/index.html" };
   const valid = schema.parse({ version: 1, action: "canUseFeature", source: "popup", requestId: "feature-check-123", payload: { feature: "ai.summary" } }, sender);
   assert.equal(valid.ok, true);
   const invalid = schema.parse({ version: 1, action: "canUseFeature", source: "popup", requestId: "feature-check-bad", payload: { feature: "AI SUMMARY" } }, sender);
@@ -89,7 +89,7 @@ test("FeatureGate 在订阅检查异常时默认拒绝且不泄漏异常", async
 });
 
 function loadBackgroundGateAction(check) {
-  const source = fs.readFileSync(path.join(root, "background.js"), "utf8");
+  const source = fs.readFileSync(path.join(root, "background/service-worker.js"), "utf8");
   const start = source.indexOf("  function gateAction(");
   const end = source.indexOf("\n\n  function controlActiveTab", start);
   assert.ok(start >= 0 && end > start, "background gateAction is missing");
@@ -125,7 +125,7 @@ test("普通界面动作通过门控后只执行一次", async () => {
 });
 
 test("普通界面视频、OCR、AI 入口均使用对应 FeatureGate", () => {
-  const source = fs.readFileSync(path.join(root, "background.js"), "utf8");
+  const source = fs.readFileSync(path.join(root, "background/service-worker.js"), "utf8");
   assert.match(source, /controlActiveTab:\s*function\s*\([^)]*\)\s*\{\s*return gateAction\("video\.basic"/);
   for (const action of ["captureVisiblePage", "startRegionCapture", "saveManualCapture", "getManualCapture"]) {
     assert.match(source, new RegExp(action + ":\\s*function\\s*\\([^)]*\\)\\s*\\{\\s*return gateAction\\(\"ocr\\.basic\""));

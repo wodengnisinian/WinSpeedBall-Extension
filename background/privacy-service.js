@@ -6,12 +6,16 @@
   var LOCAL_KEYS = [
     "manualCaptureDataUrl", "manualCaptureTime",
     "manualOcrText", "manualOcrSourceTime", "ocrJobSourceTime", "ocrJobStatus", "ocrJobProgress", "ocrJobStage", "ocrJobError", "ocrJobUpdatedAt",
-    "aiQuestionHistory", "manualAiSourceTime", "manualAiPrompt", "manualAiResponse", "aiJobSourceTime", "aiJobStatus", "aiJobError", "aiJobUpdatedAt",
+    "voiceJobId", "voiceJobStatus", "voiceJobProgress", "voiceJobError", "voiceTranscript", "voiceStartedAt", "voiceJobUpdatedAt", "voiceTabId", "voiceDurationMs", "voiceNeedsToolbarPopup",
+    "aiQuestionHistory", "aiQuestionHistoryByProvider", "aiProviderWorkspaces", "aiSelectedProvider", "manualAiSourceTime", "manualAiPrompt", "manualAiResponse", "aiJobSourceTime", "aiJobStatus", "aiJobError", "aiJobUpdatedAt",
     "popupLogs", "userScripts", "developerSdkDraft", "developerSdkDrafts", "developerActiveDraftId", "sdkScriptStorage", "sdkPermissionGrants", "lastWorkspaceScript", "scriptWorkspaceActive", "popupState", "popupStateBrowser", "popupStatePinned",
     "localUserAccounts", "activeUserProviderId", "usageDeclarationAcceptance", "usageDeclarationHistory"
   ];
-  var OCR_KEYS = ["manualOcrText", "manualOcrSourceTime", "ocrJobSourceTime", "ocrJobStatus", "ocrJobProgress", "ocrJobStage", "ocrJobError", "ocrJobUpdatedAt"];
-  var AI_KEYS = ["aiQuestionHistory", "manualAiSourceTime", "manualAiPrompt", "manualAiResponse", "aiJobSourceTime", "aiJobStatus", "aiJobError", "aiJobUpdatedAt"];
+  var OCR_KEYS = [
+    "manualOcrText", "manualOcrSourceTime", "ocrJobSourceTime", "ocrJobStatus", "ocrJobProgress", "ocrJobStage", "ocrJobError", "ocrJobUpdatedAt",
+    "voiceJobId", "voiceJobStatus", "voiceJobProgress", "voiceJobError", "voiceTranscript", "voiceStartedAt", "voiceJobUpdatedAt", "voiceTabId", "voiceDurationMs", "voiceNeedsToolbarPopup"
+  ];
+  var AI_KEYS = ["aiQuestionHistory", "aiQuestionHistoryByProvider", "aiProviderWorkspaces", "aiSelectedProvider", "manualAiSourceTime", "manualAiPrompt", "manualAiResponse", "aiJobSourceTime", "aiJobStatus", "aiJobError", "aiJobUpdatedAt"];
   var POPUP_STATE_KEYS = ["popupState", "popupStateBrowser", "popupStatePinned"];
 
   function getLocal() {
@@ -111,7 +115,15 @@
     return Promise.all([getLocal(), captureCount()]).then(function (values) {
       var data = values[0] || {};
       var ocrCount = String(data.manualOcrText || "").trim() || data.ocrJobSourceTime ? 1 : 0;
-      var aiHistory = Array.isArray(data.aiQuestionHistory) ? data.aiQuestionHistory.length : 0;
+      if (String(data.voiceTranscript || "").trim() || data.voiceJobId) ocrCount += 1;
+      var historyGroups = data.aiQuestionHistoryByProvider && typeof data.aiQuestionHistoryByProvider === "object"
+        ? data.aiQuestionHistoryByProvider
+        : null;
+      var aiHistory = historyGroups
+        ? Object.keys(historyGroups).reduce(function (total, providerId) {
+          return total + (Array.isArray(historyGroups[providerId]) ? historyGroups[providerId].length : 0);
+        }, 0)
+        : (Array.isArray(data.aiQuestionHistory) ? data.aiQuestionHistory.length : 0);
       var latestAiCount = String(data.manualAiPrompt || "").trim() || String(data.manualAiResponse || "").trim() ? 1 : 0;
       var scriptCount = Array.isArray(data.userScripts) ? data.userScripts.length : 0;
       var sdkDraftCount = Array.isArray(data.developerSdkDrafts) ? data.developerSdkDrafts.filter(function (draft) { return draft && String(draft.code || "").trim(); }).length : 0;
@@ -127,7 +139,7 @@
         localOnly: true,
         categories: [
           { id: "screenshots", label: "Screenshots", count: values[1] },
-          { id: "ocr", label: "OCR records", count: ocrCount },
+          { id: "ocr", label: "Question capture records", count: ocrCount },
           { id: "ai", label: "AI history", count: aiHistory + latestAiCount },
           { id: "logs", label: "Logs", count: Array.isArray(data.popupLogs) ? data.popupLogs.length : 0 },
           { id: "scripts", label: "User scripts", count: scriptCount },

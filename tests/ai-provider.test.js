@@ -16,6 +16,7 @@ function runScript(context, relativePath) {
 function createContext(extra) {
   const context = vm.createContext(Object.assign({
     AbortController,
+    TextDecoder,
     URL,
     clearTimeout,
     console,
@@ -99,13 +100,18 @@ function createStorage(initial) {
   };
 }
 
-function loadAiService(initial) {
+function loadAiService(initial, options) {
+  options = options || {};
   const storage = createStorage(initial);
   const context = createContext({
-    fetch: async () => openAiSuccess("ok"),
+    fetch: options.fetch || (async () => openAiSuccess("ok")),
     WinSpeedBallStorageService: storage.service
   });
   runScript(context, "background/ai-providers.js");
+  if (options.realTextNormalizer) {
+    runScript(context, "vendor/opencc/opencc-full-1.4.1.js");
+    runScript(context, "voice/text-filter.js");
+  }
   runScript(context, "background/ai-service.js");
   return { context, service: context.WinSpeedBallAiService, storage };
 }
@@ -302,6 +308,72 @@ test("空文本成功响应被拒绝", async () => {
   assert.equal(result.code, "EMPTY_RESPONSE");
 });
 
+test("超大 AI 响应在流式读取阶段被取消", async () => {
+  let cancelled = false;
+  const chunks = [new Uint8Array(1024 * 1024 + 1), new Uint8Array(1024 * 1024 + 1)];
+  const context = loadProviders(async () => ({
+    ok: true,
+    status: 200,
+    headers: { get() { return null; } },
+    body: {
+      getReader() {
+        return {
+          read() {
+            return Promise.resolve(chunks.length ? { done: false, value: chunks.shift() } : { done: true });
+          },
+          cancel() {
+            cancelled = true;
+            return Promise.resolve();
+          }
+        };
+      }
+    },
+    text() { throw new Error("streaming reader should be used"); }
+  }));
+  const result = await context.WinSpeedBallAiProviders.create({
+    provider: "openai",
+    apiKey: "key"
+  }).chat({ messages: [{ role: "user", content: "hello" }] });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "INVALID_RESPONSE");
+  assert.equal(result.error, "AI response is too large.");
+  assert.equal(cancelled, true);
+});
+
+test("AI 回复在返回和保存前统一为简体中文或正常英文", async () => {
+  const { service } = loadAiService({ deepseekApiKey: "key" }, {
+    realTextNormalizer: true,
+    fetch: async () => openAiSuccess("繁體回答\nEnglish 𝕋𝕖𝕤𝕥\n한국어")
+  });
+  const result = await callbackResult((done) => service.call({ prompt: "question" }, done));
+  assert.equal(result.ok, true);
+  assert.equal(result.content, "繁体回答\nEnglish Test");
+});
+
+test("单次 AI 请求可以指定 Provider 且不改动默认服务", async () => {
+  let requestedUrl = "";
+  const { service, storage } = loadAiService({
+    aiProvider: "deepseek",
+    aiSettingsVersion: 1,
+    aiProviderConfigs: {
+      deepseek: { apiKey: "deepseek-key", baseUrl: "https://api.deepseek.com", model: "deepseek-model" },
+      openai: { apiKey: "openai-key", baseUrl: "https://api.openai.com/v1", model: "openai-model" },
+      claude: { apiKey: "", baseUrl: "https://api.anthropic.com/v1", model: "claude-model" },
+      local: { apiKey: "", baseUrl: "http://localhost:11434/v1", model: "local-model" }
+    }
+  }, {
+    fetch: async (url) => {
+      requestedUrl = url;
+      return openAiSuccess("OpenAI answer");
+    }
+  });
+  const result = await callbackResult((done) => service.call({ provider: "openai", prompt: "question" }, done));
+  assert.equal(result.ok, true);
+  assert.equal(result.provider, "openai");
+  assert.equal(requestedUrl, "https://api.openai.com/v1/chat/completions");
+  assert.equal(storage.data.aiProvider, "deepseek");
+});
+
 test("旧 deepseek 配置迁移到新版配置且保留旧键", async () => {
   const { service, storage } = loadAiService({
     deepseekApiKey: "legacy-key",
@@ -386,11 +458,11 @@ test("消息 Schema 同时支持通用和旧版 AI 动作", () => {
   });
   runScript(context, "background/message-schema.js");
   const schema = context.WinSpeedBallMessageSchema;
-  const sender = { id: extensionId, url: `chrome-extension://${extensionId}/popup.html` };
+  const sender = { id: extensionId, url: `chrome-extension://${extensionId}/popup/index.html` };
   const validCases = [
     ["saveAiSettings", { provider: "openai", apiKey: "key", baseUrl: "https://api.openai.com/v1", model: "gpt-test" }],
     ["testAI", {}],
-    ["askAI", { prompt: "hello", task: "summary" }],
+    ["askAI", { provider: "openai", prompt: "hello", task: "summary" }],
     ["saveApiKey", { provider: "deepseek", apiKey: "key" }],
     ["testDeepSeek", {}],
     ["askDeepSeek", { prompt: "hello" }]
@@ -406,4 +478,5 @@ test("消息 Schema 同时支持通用和旧版 AI 动作", () => {
     baseUrl: "http://remote.example/v1"
   }), sender).ok, false);
   assert.equal(schema.parse(popupEnvelope("askAI", { task: "auto-answer" }), sender).ok, false);
+  assert.equal(schema.parse(popupEnvelope("askAI", { provider: "unknown", prompt: "hello" }), sender).ok, false);
 });

@@ -138,7 +138,7 @@ function loadContentScript(mediaDefinitions) {
   };
   context.window = context;
   vm.createContext(context);
-  vm.runInContext(fs.readFileSync(path.join(root, "content_script.js"), "utf8"), context);
+  vm.runInContext(fs.readFileSync(path.join(root, "content/index.js"), "utf8"), context);
   return {
     api: context.winSpeedBall,
     media,
@@ -166,7 +166,7 @@ test("VideoService 聚合稳定媒体 ID、帧和控制模式", () => {
 test("VideoService 将媒体控制发送到页面主环境", () => {
   const source = fs.readFileSync(path.join(root, "background/video-service.js"), "utf8");
   assert.match(source, /world:\s*"MAIN"/);
-  assert.match(source, /files:\s*\["shadow_hook\.js",\s*"content\/media-core-main\.js"\]/);
+  assert.match(source, /files:\s*\["content\/shadow-hook\.js",\s*"content\/media-core-main\.js"\]/);
   assert.match(source, /WinSpeedBallMediaCoreV6\.handleCommand/);
   assert.match(source, /command\.type === "EXTRACT_PAGE_TEXT"[\s\S]*?sendIsolatedCommandToAllFrames/);
   assert.match(source, /authoritative = mediaInfo \|\| firstOk/);
@@ -262,12 +262,12 @@ test("倍速强控可阻止原生 setter 绕过并按需逐帧恢复", () => {
 
 test("视频控制会发现跨域播放器并注册页面早期强控", () => {
   const client = fs.readFileSync(path.join(root, "popup/message-client.js"), "utf8");
-  const popup = fs.readFileSync(path.join(root, "popup.js"), "utf8");
-  const html = fs.readFileSync(path.join(root, "popup.html"), "utf8");
+  const popup = fs.readFileSync(path.join(root, "popup/index.js"), "utf8");
+  const html = fs.readFileSync(path.join(root, "popup/index.html"), "utf8");
   assert.match(client, /document\.querySelectorAll\("iframe,frame"\)/);
   assert.match(client, /chrome\.permissions\.request\(\{ origins: requested \}/);
   assert.match(client, /id = "winspeedball-media-preload"/);
-  assert.match(client, /js: \["shadow_hook\.js", "content\/media-core-main\.js"\]/);
+  assert.match(client, /js: \["content\/shadow-hook\.js", "content\/media-core-main\.js"\]/);
   assert.match(client, /runAt: "document_start"/);
   assert.match(client, /allFrames: true/);
   assert.match(client, /world: "MAIN"/);
@@ -281,7 +281,7 @@ test("视频控制会发现跨域播放器并注册页面早期强控", () => {
 });
 
 test("一次应用命令不再隐式启动锁定定时器", () => {
-  const source = fs.readFileSync(path.join(root, "content_script.js"), "utf8");
+  const source = fs.readFileSync(path.join(root, "content/index.js"), "utf8");
   for (const command of ["SET_RATE", "STEP_UP", "STEP_DOWN", "SET_MUTED", "TOGGLE_MUTED", "SET_VOLUME"]) {
     const start = source.indexOf(`case "${command}":`);
     const end = source.indexOf("case ", start + 6);
@@ -303,7 +303,7 @@ test("消息 Schema 支持显式锁定、停止、媒体列表、播放和暂停
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(root, "background/message-schema.js"), "utf8"), context);
   const schema = context.self.WinSpeedBallMessageSchema;
-  const sender = { id: "extension-id", url: "chrome-extension://extension-id/popup.html" };
+  const sender = { id: "extension-id", url: "chrome-extension://extension-id/popup/index.html" };
   for (const type of ["LOCK_STATE", "STOP_LOCK", "GET_MEDIA_LIST", "PLAY", "PAUSE"]) {
     const parsed = schema.parse({ version: 1, action: "controlActiveTab", source: "popup", requestId: `video-${type}`, payload: { command: { type } } }, sender);
     assert.equal(parsed.ok, true, type);
@@ -311,13 +311,13 @@ test("消息 Schema 支持显式锁定、停止、媒体列表、播放和暂停
 });
 
 test("区域截图按能力探测内容脚本，不依赖过期版本字符串", () => {
-  const source = fs.readFileSync(path.join(root, "background.js"), "utf8");
+  const source = fs.readFileSync(path.join(root, "background/service-worker.js"), "utf8");
   assert.match(source, /typeof window\.winSpeedBall\.startRegionCapture === "function"/);
   assert.equal(source.includes("2026-07-11-player-adapters-v1"), false);
 });
 
 test("重复启动区域截图会先清理旧框选再重新开始", () => {
-  const source = fs.readFileSync(path.join(root, "content_script.js"), "utf8");
+  const source = fs.readFileSync(path.join(root, "content/index.js"), "utf8");
   assert.match(source, /var regionCaptureCleanup = null/);
   assert.match(source, /if \(regionCaptureActive && typeof regionCaptureCleanup === "function"\)\s*\{\s*regionCaptureCleanup\(false\)/);
   assert.doesNotMatch(source, /Region capture is already active/);
@@ -326,7 +326,7 @@ test("重复启动区域截图会先清理旧框选再重新开始", () => {
 });
 
 test("区域截图遮罩接管 iframe 上方的鼠标事件", () => {
-  const source = fs.readFileSync(path.join(root, "content_script.js"), "utf8");
+  const source = fs.readFileSync(path.join(root, "content/index.js"), "utf8");
   const capture = source.slice(source.indexOf("function startRegionCapture"), source.indexOf("function handleCommand"));
   const overlayStyle = capture.slice(capture.indexOf("overlay.style.cssText"), capture.indexOf("selection.style.cssText"));
   assert.match(overlayStyle, /"pointer-events:auto"/);

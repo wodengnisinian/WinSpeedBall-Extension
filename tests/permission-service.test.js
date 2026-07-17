@@ -81,7 +81,7 @@ function binding(overrides = {}) {
     code: "await WSB.video.current();",
     capabilities: ["video.read", "page.read"],
     originScope: ["https://example.com/*", "https://study.example.org/*"],
-    sdkVersion: "0.1.0-beta"
+    sdkVersion: "3.7.0-beta"
   }, overrides);
 }
 
@@ -199,7 +199,7 @@ test("runtime token is short-lived, capability-scoped, origin-scoped, and sessio
 
   const valid = await service.validateRuntimeToken(created.token, {
     scriptId: "study-helper",
-    sdkVersion: "0.1.0-beta",
+    sdkVersion: "3.7.0-beta",
     capability: "video.read",
     origin: "https://example.com/course/1"
   });
@@ -208,7 +208,7 @@ test("runtime token is short-lived, capability-scoped, origin-scoped, and sessio
 
   const deniedCapability = await service.validateRuntimeToken(created.token, {
     scriptId: "study-helper",
-    sdkVersion: "0.1.0-beta",
+    sdkVersion: "3.7.0-beta",
     capability: "video.control",
     origin: "https://example.com/course/1"
   });
@@ -216,7 +216,7 @@ test("runtime token is short-lived, capability-scoped, origin-scoped, and sessio
 
   const deniedOrigin = await service.validateRuntimeToken(created.token, {
     scriptId: "study-helper",
-    sdkVersion: "0.1.0-beta",
+    sdkVersion: "3.7.0-beta",
     capability: "video.read",
     origin: "https://attacker.example/course/1"
   });
@@ -224,7 +224,7 @@ test("runtime token is short-lived, capability-scoped, origin-scoped, and sessio
 
   const wrongScript = await service.validateRuntimeToken(created.token, {
     scriptId: "other-script",
-    sdkVersion: "0.1.0-beta",
+    sdkVersion: "3.7.0-beta",
     capability: "video.read",
     origin: "https://example.com/course/1"
   });
@@ -235,7 +235,7 @@ test("runtime token is short-lived, capability-scoped, origin-scoped, and sessio
   assert.equal(sessionData.sdkRuntimeTokens, undefined);
   const afterRevoke = await service.validateRuntimeToken(created.token, {
     scriptId: "study-helper",
-    sdkVersion: "0.1.0-beta",
+    sdkVersion: "3.7.0-beta",
     capability: "video.read",
     origin: "https://example.com/"
   });
@@ -251,7 +251,7 @@ test("runtime token expires and rejects excessive lifetime", async () => {
   fixture.advance(1001);
   const expired = await fixture.service.validateRuntimeToken(created.token, {
     scriptId: "study-helper",
-    sdkVersion: "0.1.0-beta",
+    sdkVersion: "3.7.0-beta",
     capability: "video.read",
     origin: "https://example.com/"
   });
@@ -269,7 +269,7 @@ test("runtime token survives service worker reconstruction in the same browser s
   const restartedWorker = buildService(sharedState);
   const valid = await restartedWorker.service.validateRuntimeToken(created.token, {
     scriptId: "study-helper",
-    sdkVersion: "0.1.0-beta",
+    sdkVersion: "3.7.0-beta",
     capability: "page.read",
     origin: "https://study.example.org/lesson/1"
   });
@@ -284,7 +284,7 @@ test("grant changes, grant revocation, and external deletion invalidate runtime 
   await service.grant(binding());
   const invalidatedByGrant = await service.validateRuntimeToken(first.token, {
     scriptId: "study-helper",
-    sdkVersion: "0.1.0-beta",
+    sdkVersion: "3.7.0-beta",
     capability: "video.read",
     origin: "https://example.com/"
   });
@@ -294,7 +294,7 @@ test("grant changes, grant revocation, and external deletion invalidate runtime 
   delete localData.sdkPermissionGrants["study-helper"];
   const invalidatedByStorage = await service.validateRuntimeToken(second.token, {
     scriptId: "study-helper",
-    sdkVersion: "0.1.0-beta",
+    sdkVersion: "3.7.0-beta",
     capability: "video.read",
     origin: "https://example.com/"
   });
@@ -321,7 +321,7 @@ test("篡改 Session Storage 中的 Token 绑定后会永久失效", async () =>
   fixture.sessionData.sdkRuntimeTokens[created.token].capabilities.push("video.control");
   const result = await fixture.service.validateRuntimeToken(created.token, {
     scriptId: "study-helper",
-    sdkVersion: "0.1.0-beta",
+    sdkVersion: "3.7.0-beta",
     capability: "video.control",
     origin: "https://example.com/"
   });

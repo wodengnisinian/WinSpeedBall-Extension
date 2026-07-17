@@ -68,18 +68,37 @@
   function validateAutomation(payload) {
     var error = checkKeys(payload, ["command", "interval", "tabId", "originPattern"], ["command"]);
     if (error) return error;
-    if (["START", "STOP", "NEXT", "PREV", "SET_INTERVAL", "GET_STATE"].indexOf(payload.command) < 0) return "Automation command is invalid.";
+    if (["START", "STOP", "DETECT", "NEXT", "PREV", "SET_INTERVAL", "GET_STATE"].indexOf(payload.command) < 0) return "Automation command is invalid.";
     if (payload.interval != null && (!isFiniteNumber(payload.interval) || payload.interval < 30 || payload.interval > 3600)) return "Automation interval is invalid.";
-    if (payload.command === "START") {
+    var hasTabId = payload.tabId != null;
+    var hasOriginPattern = payload.originPattern != null;
+    if (payload.command === "START" || hasTabId || hasOriginPattern) {
       if (!Number.isInteger(payload.tabId) || payload.tabId < 0) return "Automation tab is invalid.";
       if (!validOriginPattern(payload.originPattern)) return "Automation site permission is invalid.";
     }
     return "";
   }
 
-  function validateAi(payload) {
-    var error = checkKeys(payload, ["prompt", "messages", "temperature", "autoOcrSourceTime", "task", "targetLanguage"], []);
+  function validateBookAutomation(payload) {
+    var error = checkKeys(payload, ["command", "interval", "tabId", "originPattern", "mode"], ["command"]);
     if (error) return error;
+    if (["START", "STOP", "DETECT", "NEXT", "PREV", "SET_INTERVAL", "GET_STATE"].indexOf(payload.command) < 0) return "Book command is invalid.";
+    if (payload.mode != null && ["book", "image", "chaoxing"].indexOf(payload.mode) < 0) return "Book mode is invalid.";
+    var minimumInterval = payload.mode === "chaoxing" ? 2 : 30;
+    if (payload.interval != null && (!isFiniteNumber(payload.interval) || payload.interval < minimumInterval || payload.interval > 3600)) return "Book interval is invalid.";
+    var hasTabId = payload.tabId != null;
+    var hasOriginPattern = payload.originPattern != null;
+    if (payload.command === "START" || hasTabId || hasOriginPattern) {
+      if (!Number.isInteger(payload.tabId) || payload.tabId < 0) return "Book tab is invalid.";
+      if (!validOriginPattern(payload.originPattern)) return "Book site permission is invalid.";
+    }
+    return "";
+  }
+
+  function validateAi(payload) {
+    var error = checkKeys(payload, ["provider", "prompt", "messages", "temperature", "autoOcrSourceTime", "task", "targetLanguage"], []);
+    if (error) return error;
+    if (payload.provider != null && ["deepseek", "openai", "claude", "local"].indexOf(payload.provider) < 0) return "AI provider is invalid.";
     if (payload.prompt != null && (typeof payload.prompt !== "string" || payload.prompt.length > 50000)) return "AI prompt is too large.";
     if (payload.messages != null) {
       if (!Array.isArray(payload.messages) || payload.messages.length > 50) return "AI messages are invalid.";
@@ -154,7 +173,7 @@
   }
 
   function validateSdkCapabilities(capabilities) {
-    return Array.isArray(capabilities) && capabilities.length > 0 && capabilities.length <= 6 && !capabilities.some(function (capability) {
+    return Array.isArray(capabilities) && capabilities.length > 0 && capabilities.length <= global.WinSpeedBallSdkContracts.CAPABILITIES.length && !capabilities.some(function (capability) {
       return !global.WinSpeedBallSdkContracts.validCapability(capability);
     });
   }
@@ -218,6 +237,10 @@
     } },
     getManualCapture: { sources: ["popup"], validate: noPayload },
     retryManualOcr: { sources: ["popup"], validate: noPayload },
+    startTabAudioCapture: { sources: ["popup"], validate: noPayload },
+    stopTabAudioCapture: { sources: ["popup"], validate: noPayload },
+    cancelTabAudioCapture: { sources: ["popup"], validate: noPayload },
+    getTabAudioCaptureState: { sources: ["popup"], validate: noPayload },
     getUsageDeclaration: { sources: ["popup"], validate: noPayload },
     acceptUsageDeclaration: { sources: ["popup"], validate: function (payload) {
       var error = checkKeys(payload, ["version", "accepted"], ["version", "accepted"]);
@@ -315,7 +338,7 @@
     } },
     getUserScriptsStatus: { sources: ["popup"], validate: noPayload },
     douyinPanel: { sources: ["popup"], validate: validateAutomation },
-    bookPanel: { sources: ["popup"], validate: validateAutomation },
+    bookPanel: { sources: ["popup"], validate: validateBookAutomation },
     testAI: { sources: ["popup"], validate: noPayload },
     askAI: { sources: ["popup"], validate: validateAi },
     testDeepSeek: { sources: ["popup"], validate: noPayload },
@@ -339,16 +362,37 @@
       if (error) return error;
       if (!isFiniteNumber(payload.sourceTime) || payload.sourceTime <= 0) return "OCR source time is invalid.";
       return typeof payload.error === "string" && payload.error.length <= 2000 ? "" : "OCR error is invalid.";
+    } },
+    voiceJobProgress: { sources: ["offscreen-ocr"], validate: function (payload) {
+      var error = checkKeys(payload, ["jobId", "status", "progress", "durationMs"], ["jobId", "status", "progress", "durationMs"]);
+      if (error) return error;
+      if (typeof payload.jobId !== "string" || !/^voice-[A-Za-z0-9-]{1,100}$/.test(payload.jobId)) return "Voice job ID is invalid.";
+      if (["recording", "loading", "transcribing"].indexOf(payload.status) < 0) return "Voice status is invalid.";
+      if (!isFiniteNumber(payload.progress) || payload.progress < 0 || payload.progress > 1) return "Voice progress is invalid.";
+      return isFiniteNumber(payload.durationMs) && payload.durationMs >= 0 && payload.durationMs <= 120000 ? "" : "Voice duration is invalid.";
+    } },
+    voiceJobComplete: { sources: ["offscreen-ocr"], validate: function (payload) {
+      var error = checkKeys(payload, ["jobId", "text", "durationMs"], ["jobId", "text", "durationMs"]);
+      if (error) return error;
+      if (typeof payload.jobId !== "string" || !/^voice-[A-Za-z0-9-]{1,100}$/.test(payload.jobId)) return "Voice job ID is invalid.";
+      if (typeof payload.text !== "string" || payload.text.length > 200000) return "Voice transcript is invalid.";
+      return isFiniteNumber(payload.durationMs) && payload.durationMs >= 0 && payload.durationMs <= 120000 ? "" : "Voice duration is invalid.";
+    } },
+    voiceJobFailed: { sources: ["offscreen-ocr"], validate: function (payload) {
+      var error = checkKeys(payload, ["jobId", "error"], ["jobId", "error"]);
+      if (error) return error;
+      if (typeof payload.jobId !== "string" || !/^voice-[A-Za-z0-9-]{1,100}$/.test(payload.jobId)) return "Voice job ID is invalid.";
+      return typeof payload.error === "string" && payload.error.length <= 2000 ? "" : "Voice error is invalid.";
     } }
   };
 
   function senderMatches(source, sender) {
     if (!sender || sender.id !== chrome.runtime.id) return false;
     if (source === "popup") {
-      var popupUrl = chrome.runtime.getURL("popup.html");
+      var popupUrl = chrome.runtime.getURL("popup/index.html");
       return sender.url === popupUrl || String(sender.url || "").indexOf(popupUrl + "?") === 0;
     }
-    if (source === "offscreen-ocr") return sender.url === chrome.runtime.getURL("ocr_worker.html");
+    if (source === "offscreen-ocr") return !sender.tab && sender.url === chrome.runtime.getURL("ocr/offscreen.html");
     if (source === "content" || source === "auto-script-trigger") {
       return !!sender.tab && /^https?:\/\//i.test(String(sender.url || ""));
     }

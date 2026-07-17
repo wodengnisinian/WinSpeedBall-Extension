@@ -13,7 +13,7 @@
   }
 
   function popupUrl() {
-    return chrome.runtime.getURL("popup.html?pinned=1");
+    return chrome.runtime.getURL("popup/index.html?pinned=1");
   }
 
   function getStoredWindowId(callback) {
@@ -160,9 +160,33 @@
     });
   }
 
+  function restoreFixedBounds(windowInfo, focused, callback) {
+    var patch = {
+      width: DEFAULT_BOUNDS.width,
+      height: DEFAULT_BOUNDS.height
+    };
+    if (focused === true) patch.focused = true;
+
+    function applyBounds() {
+      chrome.windows.update(windowInfo.id, patch, function (updated) {
+        var error = lastErrorMessage();
+        callback(error || !updated ? null : updated, error);
+      });
+    }
+
+    if (windowInfo && windowInfo.state && windowInfo.state !== "normal") {
+      chrome.windows.update(windowInfo.id, { state: "normal" }, function (normalized) {
+        var error = lastErrorMessage();
+        if (error || !normalized) { callback(null, error || "Could not restore pinned window state."); return; }
+        applyBounds();
+      });
+      return;
+    }
+    applyBounds();
+  }
+
   function focusExistingWindow(windowInfo, recovered, callback) {
-    chrome.windows.update(windowInfo.id, { focused: true }, function (updated) {
-      var error = lastErrorMessage();
+    restoreFixedBounds(windowInfo, true, function (updated, error) {
       if (error || !updated) { callback({ ok: false, error: error || "Could not focus pinned window." }); return; }
       setStoredWindowId(windowInfo.id, function (stored) {
         if (stored.ok === false) { callback(stored); return; }
@@ -237,11 +261,7 @@
             saveWindowState(pending, true);
             return;
           }
-          chrome.windows.update(pending.id, {
-            width: DEFAULT_BOUNDS.width,
-            height: DEFAULT_BOUNDS.height
-          }, function (updated) {
-            var error = lastErrorMessage();
+          restoreFixedBounds(pending, false, function (updated, error) {
             var corrected = Object.assign({}, pending, error || !updated ? {} : updated, {
               left: pending.left,
               top: pending.top,

@@ -1,15 +1,18 @@
 (function (global) {
   "use strict";
 
-  var SDK_VERSION = "0.1.0-beta";
+  var SDK_VERSION = "3.7.0-beta";
   var PROTOCOL_VERSION = 1;
   var CHANNEL = "WSB_SDK";
   var CAPABILITIES = Object.freeze([
     "video.read",
     "video.control",
     "ocr.read",
+    "qa.read",
+    "ai.read",
     "ai.request",
     "page.read",
+    "book.read",
     "storage"
   ]);
   var METHOD_CAPABILITIES = Object.freeze({
@@ -24,6 +27,11 @@
     "ocr.latest": "ocr.read",
     "ocr.capture": "ocr.read",
     "ocr.recognize": "ocr.read",
+    "qa.latest": "qa.read",
+    "qa.ocr": "qa.read",
+    "qa.voice": "qa.read",
+    "ai.latest": "ai.read",
+    "ai.history": "ai.read",
     "ai.ask": "ai.request",
     "ai.summary": "ai.request",
     "ai.translate": "ai.request",
@@ -31,9 +39,39 @@
     "page.text": "page.read",
     "page.title": "page.read",
     "page.url": "page.read",
+    "book.getStatus": "book.read",
     "event.on": "event-specific",
     "storage.get": "storage",
     "storage.set": "storage"
+  });
+  var PUBLIC_METHODS = Object.freeze({
+    "video.all": "video.getAll",
+    "video.current": "video.current",
+    "video.status": "video.getStatus",
+    "video.rate": "video.setRate",
+    "video.volume": "video.setVolume",
+    "video.mute": "video.mute",
+    "video.play": "video.play",
+    "video.pause": "video.pause",
+    "ocr.latest": "ocr.latest",
+    "ocr.capture": "ocr.capture",
+    "ocr.recognize": "ocr.recognize",
+    "qa.latest": "qa.latest",
+    "qa.ocr": "qa.ocr",
+    "qa.voice": "qa.voice",
+    "ai.latest": "ai.latest",
+    "ai.history": "ai.history",
+    "ai.ask": "ai.ask",
+    "ai.summary": "ai.summary",
+    "ai.translate": "ai.translate",
+    "page.info": "page.info",
+    "page.text": "page.text",
+    "page.title": "page.title",
+    "page.url": "page.url",
+    "book.status": "book.getStatus",
+    "event.on": "event.on",
+    "storage.get": "storage.get",
+    "storage.set": "storage.set"
   });
   var EVENT_CAPABILITIES = Object.freeze({
     "video.play": "video.read",
@@ -165,6 +203,7 @@
     CHANNEL: CHANNEL,
     CAPABILITIES: CAPABILITIES,
     METHOD_CAPABILITIES: METHOD_CAPABILITIES,
+    PUBLIC_METHODS: PUBLIC_METHODS,
     EVENT_CAPABILITIES: EVENT_CAPABILITIES,
     validCapability: validCapability,
     normalizeCapabilities: normalizeCapabilities,

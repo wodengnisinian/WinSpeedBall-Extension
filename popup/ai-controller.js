@@ -5,7 +5,30 @@
     var byId = dependencies.byId;
     var sendMessage = dependencies.sendMessage;
     var storage = dependencies.storage;
-    var history = [];
+    var historyByProvider = {};
+
+    function getProviderId() {
+      var providerId = typeof dependencies.getProviderId === "function" ? dependencies.getProviderId() : "deepseek";
+      providerId = String(providerId || "deepseek").toLowerCase();
+      return ["deepseek", "openai", "claude", "local"].indexOf(providerId) >= 0 ? providerId : "deepseek";
+    }
+
+    function getHistory(providerId) {
+      providerId = providerId || getProviderId();
+      if (!Array.isArray(historyByProvider[providerId])) historyByProvider[providerId] = [];
+      return historyByProvider[providerId];
+    }
+
+    function updateProviderState(providerId, patch) {
+      if (typeof dependencies.updateProviderWorkspace === "function") {
+        dependencies.updateProviderWorkspace(providerId, patch || {});
+        return;
+      }
+      if (providerId !== getProviderId()) return;
+      if (Object.prototype.hasOwnProperty.call(patch || {}, "mode")) byId("aiMode").value = patch.mode;
+      if (Object.prototype.hasOwnProperty.call(patch || {}, "question")) byId("aiQuestion").value = patch.question;
+      if (Object.prototype.hasOwnProperty.call(patch || {}, "answer")) byId("aiAnswer").value = patch.answer;
+    }
     function showReplyWindow(answer) {
       answer = String(answer || "").trim();
       if (!answer) return Promise.resolve({ ok: false, error: "AI 回复为空。" });
@@ -45,6 +68,7 @@
 
     function renderHistory() {
       var wrap = byId("aiHistoryList");
+      var history = getHistory();
       if (!wrap) return;
       if (!history.length) {
         wrap.textContent = "暂无记录";
@@ -67,10 +91,13 @@
         entry.appendChild(answerLine);
         entry.title = "问题：" + (item.question || "") + "\n\n回复：" + answer;
         entry.addEventListener("click", function () {
-          byId("aiMode").value = item.mode || "custom";
-          byId("aiQuestion").value = item.question || "";
+          var providerId = getProviderId();
+          updateProviderState(providerId, {
+            mode: item.mode || "custom",
+            question: item.question || "",
+            answer: item.answer || ""
+          });
           if (item.answer) {
-            byId("aiAnswer").value = item.answer;
             showReplyWindow(item.answer);
           }
         });
@@ -79,26 +106,41 @@
     }
 
     function saveHistory(entry) {
+      var providerId = String(entry.provider || getProviderId());
+      var history = getHistory(providerId);
       history = history.filter(function (item) {
         return !(item.question === entry.question && item.mode === entry.mode);
       });
       history.unshift(entry);
       history = history.slice(0, 30);
-      storage.set({ aiQuestionHistory: history }, renderHistory);
+      historyByProvider[providerId] = history;
+      storage.set({ aiQuestionHistoryByProvider: historyByProvider }, renderHistory);
     }
 
     function loadHistory() {
-      storage.get(["aiQuestionHistory"], function (data) {
-        history = Array.isArray(data.aiQuestionHistory) ? data.aiQuestionHistory : [];
+      storage.get(["aiQuestionHistoryByProvider", "aiQuestionHistory"], function (data) {
+        historyByProvider = {};
+        var stored = data.aiQuestionHistoryByProvider;
+        if (stored && typeof stored === "object" && !Array.isArray(stored)) {
+          ["deepseek", "openai", "claude", "local"].forEach(function (providerId) {
+            if (Array.isArray(stored[providerId])) historyByProvider[providerId] = stored[providerId].slice(0, 30);
+          });
+        }
+        if (!Object.keys(historyByProvider).length && Array.isArray(data.aiQuestionHistory) && data.aiQuestionHistory.length) {
+          historyByProvider[getProviderId()] = data.aiQuestionHistory.slice(0, 30);
+          storage.set({ aiQuestionHistoryByProvider: historyByProvider }, function () {});
+        }
         renderHistory();
       });
     }
 
     function clearHistory() {
-      history = [];
-      storage.set({ aiQuestionHistory: [] }, function (result) {
+      var providerId = getProviderId();
+      historyByProvider[providerId] = [];
+      storage.set({ aiQuestionHistoryByProvider: historyByProvider }, function (result) {
         renderHistory();
-        dependencies.addDetailedLog("AI", result && result.ok === false ? "清空 AI 历史失败" : "清空 AI 历史成功", {
+        dependencies.addDetailedLog("AI", result && result.ok === false ? "清空当前 AI 历史失败" : "清空当前 AI 历史成功", {
+          AI: providerId,
           原因: result && result.error || "-"
         }, result && result.ok === false ? "error" : "success");
       });
@@ -106,9 +148,10 @@
 
     function ask(sourceText, options) {
       options = options || {};
+      var providerId = getProviderId();
       sourceText = (sourceText || byId("ocrText").value || dependencies.getLatestPageText() || "").trim();
       if (!sourceText) {
-        byId("aiAnswer").value = "没有可发送的文字。请先框选 OCR，或点击“读取页面”。";
+        updateProviderState(providerId, { answer: "没有可发送的文字。请先框选 OCR，或点击“读取页面”。" });
         return Promise.resolve({ ok: false, error: "没有可发送的文字。" });
       }
 
@@ -118,37 +161,39 @@
       var question = isAutoOcr ? prompt : (byId("aiQuestion").value.trim() || "请处理当前内容");
       if (isAutoOcr) {
         mode = "custom";
-        byId("aiMode").value = "custom";
-        byId("aiQuestion").value = prompt;
+        updateProviderState(providerId, { mode: "custom", question: prompt });
       }
-      byId("aiAnswer").value = "正在请求 AI...";
+      updateProviderState(providerId, { answer: "正在请求 AI..." });
       var requestStartedAt = Date.now();
       dependencies.addDetailedLog("AI", "请求已发出", {
         类型: isAutoOcr ? "OCR 自动发送" : "手动请求",
         任务: isAutoOcr ? dependencies.captureLabel(options.autoOcrSourceTime) : "-",
+        AI: providerId,
         模式: mode,
         提示词: isAutoOcr ? (dependencies.getAutoOcrPromptTemplate() ? "自定义模板" : "OCR 原文") : "AI 页面设置",
         输入字数: prompt.length
       });
       dependencies.setTopStatus("AI 请求中");
-      var payload = { prompt: prompt };
+      var payload = { provider: providerId, prompt: prompt };
       if (options.autoOcrSourceTime) payload.autoOcrSourceTime = Number(options.autoOcrSourceTime);
       return sendMessage({ action: "askAI", payload: payload }).then(function (response) {
         var answer = response.ok ? response.content : "请求失败：" + (response.error || "未知错误");
-        byId("aiAnswer").value = answer;
+        updateProviderState(providerId, { answer: answer });
         if (response.ok) {
           dependencies.addDetailedLog("AI", "请求完成", {
             类型: isAutoOcr ? "OCR 自动发送" : "手动请求",
             任务: isAutoOcr ? dependencies.captureLabel(options.autoOcrSourceTime) : "-",
+            AI: providerId,
             耗时: (Date.now() - requestStartedAt) + "ms",
             模型: response.model || "未知",
             回复字数: answer.length
           });
-          saveHistory({ question: question, mode: mode, answer: answer, time: Date.now() });
+          saveHistory({ provider: providerId, model: String(response.model || ""), question: question, mode: mode, answer: answer, time: Date.now() });
         } else {
           dependencies.addDetailedLog("AI", "请求失败", {
             类型: isAutoOcr ? "OCR 自动发送" : "手动请求",
             任务: isAutoOcr ? dependencies.captureLabel(options.autoOcrSourceTime) : "-",
+            AI: providerId,
             耗时: (Date.now() - requestStartedAt) + "ms",
             原因: response.error || "未知错误"
           });

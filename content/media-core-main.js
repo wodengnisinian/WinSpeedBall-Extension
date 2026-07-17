@@ -422,11 +422,9 @@
     } catch (error) {}
     if (!node.querySelectorAll) return;
     var elements = [];
-    try { elements = Array.from(node.querySelectorAll("video, audio")); } catch (error) {}
-    elements.forEach(registerMedia);
-    var all = [];
-    try { all = Array.from(node.querySelectorAll("*")); } catch (error) {}
-    all.forEach(function (element) {
+    try { elements = Array.from(node.querySelectorAll("*")); } catch (error) {}
+    elements.forEach(function (element) {
+      registerMedia(element);
       try {
         if (element.shadowRoot) {
           shadowRoots.add(element.shadowRoot);

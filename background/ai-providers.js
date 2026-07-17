@@ -147,6 +147,51 @@
     return response && response.headers && typeof response.headers.get === "function" ? String(response.headers.get(name) || "") : "";
   }
 
+  function readResponseText(response, limit) {
+    var contentLength = Number(headerValue(response, "content-length"));
+    if (Number.isFinite(contentLength) && contentLength > limit) {
+      return Promise.resolve({ text: "", tooLarge: true });
+    }
+
+    var body = response && response.body;
+    if (!body || typeof body.getReader !== "function" || typeof global.TextDecoder !== "function") {
+      return Promise.resolve(response.text()).then(function (text) {
+        text = String(text || "");
+        return { text: text, tooLarge: text.length > limit };
+      });
+    }
+
+    var reader = body.getReader();
+    var decoder = new global.TextDecoder("utf-8");
+    var chunks = [];
+    var received = 0;
+
+    function stopReading() {
+      try {
+        var cancellation = reader.cancel();
+        if (cancellation && typeof cancellation.catch === "function") cancellation.catch(function () {});
+      } catch (error) {}
+      return { text: "", tooLarge: true };
+    }
+
+    function readNext() {
+      return reader.read().then(function (result) {
+        if (result.done) {
+          chunks.push(decoder.decode());
+          var text = chunks.join("");
+          return text.length > limit ? { text: "", tooLarge: true } : { text: text, tooLarge: false };
+        }
+        var value = result.value;
+        received += value && Number(value.byteLength || 0);
+        if (received > limit) return stopReading();
+        chunks.push(decoder.decode(value, { stream: true }));
+        return readNext();
+      });
+    }
+
+    return readNext();
+  }
+
   function retryAfterMs(response) {
     var value = headerValue(response, "retry-after").trim();
     if (!value) return 0;
@@ -276,10 +321,11 @@
     if (controller) fetchOptions.signal = controller.signal;
 
     return fetch(endpoint.url, fetchOptions).then(function (response) {
-      return response.text().then(function (responseText) {
-        if (responseText.length > MAX_RESPONSE_LENGTH) {
+      return readResponseText(response, MAX_RESPONSE_LENGTH).then(function (responseBody) {
+        if (responseBody.tooLarge) {
           return { ok: false, provider: provider.id, model: provider.model, code: "INVALID_RESPONSE", error: "AI response is too large.", retryable: false };
         }
+        var responseText = responseBody.text;
         var data = parseJson(responseText);
         if (!response.ok) return errorResult(provider, response, data, responseText);
         if (!data) return { ok: false, provider: provider.id, model: provider.model, code: "INVALID_RESPONSE", error: "AI response is not valid JSON.", retryable: false };

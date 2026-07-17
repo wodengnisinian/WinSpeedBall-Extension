@@ -7,8 +7,10 @@
       version: global.WinSpeedBallSdkContracts.SDK_VERSION,
       video: global.WinSpeedBallSdkVideoApi.create(options.invoke),
       ocr: global.WinSpeedBallSdkOcrApi.create(options.invoke),
+      qa: global.WinSpeedBallSdkQaApi.create(options.invoke),
       ai: global.WinSpeedBallSdkAiApi.create(options.invoke),
       page: global.WinSpeedBallSdkPageApi.create(options.invoke),
+      book: global.WinSpeedBallSdkBookApi.create(options.invoke),
       event: global.WinSpeedBallSdkEventApi.create(options.subscribe),
       storage: global.WinSpeedBallSdkStorageApi.create(options.invoke)
     };

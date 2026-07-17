@@ -90,7 +90,16 @@ test("runner 为每次运行创建独立 Worker 并在超时或终止时销毁",
 
 test("Worker 构造冻结 WSB，并屏蔽常见浏览器与扩展全局绑定", () => {
   const source = fs.readFileSync(sdkPath("script-worker.js"), "utf8");
-  assert.match(source, /return Object\.freeze\(\{[\s\S]*video:[\s\S]*ocr:[\s\S]*ai:[\s\S]*page:[\s\S]*event:[\s\S]*storage:/);
+  assert.match(source, /return Object\.freeze\(\{[\s\S]*video:[\s\S]*ocr:[\s\S]*qa:[\s\S]*ai:[\s\S]*page:[\s\S]*book:[\s\S]*event:[\s\S]*storage:/);
+  assert.match(source, /qa:\s*Object\.freeze\(\["latest",\s*"ocr",\s*"voice"\]\)/);
+  assert.match(source, /qa:\s*createMethodGroup\("qa",\s*METHODS\.qa\)/);
+  assert.match(source, /book:\s*Object\.freeze\(\["status",\s*"getStatus"\]\)/);
+  assert.match(source, /book:\s*createMethodGroup\("book",\s*METHODS\.book\)/);
+  assert.match(source, /"video\.status":\s*"video\.getStatus"/);
+  assert.match(source, /"book\.status":\s*"book\.getStatus"/);
+  assert.match(source, /METHOD_ALIASES\[publicMethod\]\s*\|\|\s*publicMethod/);
+  assert.match(source, /publicMethod === "ai\.history" && !args\.length/);
+  assert.match(source, /publicMethod === "video\.mute" && !args\.length/);
   for (const binding of ["chrome", "browser", "globalThis", "fetch", "XMLHttpRequest", "Worker", "importScripts", "indexedDB"]) {
     assert.match(source, new RegExp(`"${binding}"`));
   }

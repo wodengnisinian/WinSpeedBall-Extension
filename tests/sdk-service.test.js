@@ -6,6 +6,9 @@ const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
 const code = `// ==UserScript==\n// @name Test\n// @version 1.0.0\n// @wsb-capability video.read\n// @wsb-capability storage\n// ==/UserScript==`;
+const bookCode = `// ==UserScript==\n// @name Book Test\n// @version 1.0.0\n// @wsb-capability book.read\n// ==/UserScript==`;
+const publicDataCode = `// ==UserScript==\n// @name Public Data Test\n// @version 1.0.0\n// @wsb-capability video.read\n// @wsb-capability qa.read\n// @wsb-capability ai.read\n// ==/UserScript==`;
+const bookNextCheckAt = Date.UTC(2026, 6, 17, 12, 0, 0);
 
 function buildService(options = {}) {
   let sessions = {};
@@ -23,7 +26,7 @@ function buildService(options = {}) {
     contracts: context.self.WinSpeedBallSdkContracts,
     methodSchema: context.self.WinSpeedBallSdkMethodSchema,
     permissionService: {
-      grant(binding) { grantedCapabilities = binding.capabilities.slice(); return Promise.resolve({ ok: true, grant: { scriptId: binding.scriptId, codeHash: "a".repeat(64), fingerprint: "b".repeat(64), sdkVersion: "0.1.0-beta", capabilities: binding.capabilities, originScope: binding.originScope } }); },
+      grant(binding) { grantedCapabilities = binding.capabilities.slice(); return Promise.resolve({ ok: true, grant: { scriptId: binding.scriptId, codeHash: "a".repeat(64), fingerprint: "b".repeat(64), sdkVersion: "3.7.0-beta", capabilities: binding.capabilities, originScope: binding.originScope } }); },
       createRuntimeToken() {
         tokenSequence += 1;
         return Promise.resolve({ ok: true, token: "wsb_rt_" + tokenSequence.toString(16).padStart(64, "0"), issuedAt: Date.now(), expiresAt: Date.now() + 300000 });
@@ -56,10 +59,40 @@ function buildService(options = {}) {
     controlTab(tabId, command, callback) {
       if (command.type === "GET_MEDIA_LIST") callback({ ok: true, media: [{ id: "frame-0-media-1", frameId: 0, title: "Course", duration: 100, currentTime: 20, rate: 1, volume: 0.8, muted: false, paused: false, mediaType: "video" }] });
       else if (command.type === "EXTRACT_PAGE_TEXT") callback({ ok: true, frameResults: [{ ok: true, title: "Course", url: "https://example.com/course", text: "Lesson text" }] });
-      else callback({ ok: true, duration: 100, currentTime: 20, rate: 2, volume: 0.8, muted: false, paused: false, mediaTag: "video", controlMode: "apply" });
+      else callback({
+        ok: true, duration: 100, currentTime: 20, remainingTime: 80, rate: 2, targetRate: 2, volume: 0.8,
+        muted: false, paused: false, mediaTag: "video", mediaCount: 6, frameCount: 2, rateLocked: true,
+        rateStable: true, continuousPlayback: false, keepPlaying: true, playerType: "HTML5 强控制", controlMode: "apply"
+      });
+    },
+    getBookStatus(tabId, callback) {
+      callback({
+        ok: true,
+        mode: "chaoxing",
+        detected: true,
+        reader: "chaoxing-pdg",
+        page: "362",
+        pageType: "5",
+        pageTypeLabel: "正文页",
+        pageJumpDetected: true,
+        pageJumpValue: "5",
+        pageJumpLabel: "正文362页",
+        isBackCover: false,
+        running: true,
+        interval: 2,
+        backCoverCheckEnabled: true,
+        backCoverReached: false,
+        backCoverCheckIndex: 1,
+        backCoverCheckDueAt: bookNextCheckAt,
+        backCoverNextCheckSeconds: 300,
+        backCoverCheckSequence: [400, 300, 250, 150, 50]
+      });
     },
     callAi(payload, callback) { callback({ ok: true, content: `AI:${payload.prompt}`, model: "test-model" }); },
     getLatestOcr(callback) { callback({ ok: true, ocrText: "OCR text", time: 1700000000000 }); },
+    getVoiceState(callback) { callback({ ok: true, transcript: "Voice text", status: "completed", progress: 1, updatedAt: 1700000001000, durationMs: 8000 }); },
+    getLatestAi(callback) { callback({ ok: true, record: { provider: "openai", model: "test-model", question: "Q", answer: "A", time: "2026-07-17T00:00:00.000Z", source: "history", truncated: false } }); },
+    getAiHistory(limit, callback) { callback({ ok: true, records: [{ provider: "openai", question: "Q", answer: "A", limit }] }); },
     readSessions() { return Promise.resolve(JSON.parse(JSON.stringify(sessions))); },
     writeSessions(value) {
       if (failSessionWrites) return Promise.resolve({ ok: false, code: "SDK_SESSION_STORAGE_FAILED", error: "write failed" });
@@ -102,6 +135,38 @@ test("真实 SDK 视频和页面读取返回脱敏公开模型", async () => {
   pageRequest.scriptId = "draft_1";
   const pageDenied = await fixture.service.invoke(created.sessionToken, pageRequest);
   assert.equal(pageDenied.code, "SDK_CAPABILITY_REQUIRED");
+});
+
+test("视频状态公开图片中的全部关键字段", async () => {
+  const fixture = buildService();
+  const created = await fixture.service.prepareSession({ scriptId: "draft_1", code: publicDataCode, capabilities: ["video.read", "qa.read", "ai.read"], confirmed: true });
+  const status = await fixture.service.invoke(created.sessionToken, request("video.getStatus"));
+  assert.equal(status.ok, true);
+  assert.deepEqual({
+    rate: status.value.rate,
+    playbackState: status.value.playbackState,
+    volume: status.value.volume,
+    mediaCount: status.value.mediaCount,
+    duration: status.value.duration,
+    currentTime: status.value.currentTime,
+    autoplay: status.value.autoplay,
+    rateLocked: status.value.rateLocked
+  }, { rate: 2, playbackState: "playing", volume: 0.8, mediaCount: 6, duration: 100, currentTime: 20, autoplay: false, rateLocked: true });
+});
+
+test("问题获取与 AI 回复通过独立只读能力公开", async () => {
+  const fixture = buildService();
+  const created = await fixture.service.prepareSession({ scriptId: "draft_1", code: publicDataCode, capabilities: ["video.read", "qa.read", "ai.read"], confirmed: true });
+  const latestQuestion = await fixture.service.invoke(created.sessionToken, request("qa.latest"));
+  assert.equal(latestQuestion.ok, true);
+  assert.equal(latestQuestion.value.source, "voice");
+  assert.equal(latestQuestion.value.text, "Voice text");
+  const ocrQuestion = await fixture.service.invoke(created.sessionToken, request("qa.ocr"));
+  assert.equal(ocrQuestion.value.text, "OCR text");
+  const answer = await fixture.service.invoke(created.sessionToken, request("ai.latest"));
+  assert.equal(answer.value.answer, "A");
+  const history = await fixture.service.invoke(created.sessionToken, request("ai.history", [5]));
+  assert.equal(history.value[0].limit, 5);
 });
 
 test("SDK Storage 通过会话按脚本隔离并可关闭会话", async () => {
@@ -194,4 +259,36 @@ test("删除 SDK 草稿生命周期会同步清理会话、授权和隔离存储
   assert.equal(Object.keys(fixture.getSessions()).length, 0);
   const after = await fixture.service.invoke(created.sessionToken, { ...request("storage.get", ["value"]), scriptId: "draft_delete" });
   assert.equal(after.code, "SDK_SESSION_NOT_FOUND");
+});
+
+test("图书 SDK 使用独立 book.read 能力并返回稳定公开模型", async () => {
+  const fixture = buildService();
+  const created = await fixture.service.prepareSession({ scriptId: "draft_1", code: bookCode, capabilities: ["book.read"], confirmed: true });
+  assert.equal(created.ok, true);
+
+  const result = await fixture.service.invoke(created.sessionToken, request("book.getStatus"));
+  assert.equal(result.ok, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.value)), {
+    mode: "chaoxing",
+    detected: true,
+    reader: "chaoxing-pdg",
+    page: "362",
+    pageType: "5",
+    pageTypeLabel: "正文页",
+    currentOption: { detected: true, value: "5", label: "正文362页" },
+    isBackCover: false,
+    running: true,
+    intervalSeconds: 2,
+    monitor: {
+      enabled: true,
+      reached: false,
+      checkIndex: 1,
+      nextCheckAt: new Date(bookNextCheckAt).toISOString(),
+      nextCheckSeconds: 300,
+      sequenceSeconds: [400, 300, 250, 150, 50]
+    }
+  });
+
+  const pageDenied = await fixture.service.invoke(created.sessionToken, request("page.text"));
+  assert.equal(pageDenied.code, "SDK_CAPABILITY_REQUIRED");
 });

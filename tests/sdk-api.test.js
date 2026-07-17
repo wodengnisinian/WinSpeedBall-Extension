@@ -6,8 +6,8 @@ const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
 const sdkFiles = [
-  "contracts.js", "api-utils.js", "video-api.js", "ocr-api.js", "ai-api.js",
-  "page-api.js", "event-api.js", "storage-api.js", "runtime.js"
+  "contracts.js", "api-utils.js", "video-api.js", "ocr-api.js", "qa-api.js", "ai-api.js",
+  "page-api.js", "book-api.js", "event-api.js", "storage-api.js", "runtime.js"
 ];
 
 function buildRuntime() {
@@ -30,25 +30,31 @@ function buildRuntime() {
   return { runtime, calls, subscriptions };
 }
 
-test("SDK Runtime 暴露六组冻结 API", () => {
+test("SDK Runtime 暴露包含问题、AI 回复和图书状态的八组冻结 API", () => {
   const fixture = buildRuntime();
-  assert.equal(fixture.runtime.version, "0.1.0-beta");
-  assert.deepEqual(Object.keys(fixture.runtime), ["version", "video", "ocr", "ai", "page", "event", "storage"]);
+  assert.equal(fixture.runtime.version, "3.7.0-beta");
+  assert.deepEqual(Object.keys(fixture.runtime), ["version", "video", "ocr", "qa", "ai", "page", "book", "event", "storage"]);
   assert.equal(Object.isFrozen(fixture.runtime), true);
   assert.equal(Object.isFrozen(fixture.runtime.video), true);
+  assert.equal(Object.isFrozen(fixture.runtime.qa), true);
+  assert.equal(Object.isFrozen(fixture.runtime.book), true);
   assert.equal(Object.isFrozen(fixture.runtime.storage), true);
 });
 
-test("Video API 转换为稳定方法名和参数", async () => {
+test("Video API 使用精简名称并转换为稳定协议方法", async () => {
   const fixture = buildRuntime();
+  await fixture.runtime.video.all();
   await fixture.runtime.video.current();
-  await fixture.runtime.video.setRate(2);
-  await fixture.runtime.video.setVolume(0.5);
+  await fixture.runtime.video.status();
+  await fixture.runtime.video.rate(2);
+  await fixture.runtime.video.volume(0.5);
   await fixture.runtime.video.mute();
   await fixture.runtime.video.play();
   await fixture.runtime.video.pause();
   assert.deepEqual(JSON.parse(JSON.stringify(fixture.calls)), [
+    { method: "video.getAll", args: [] },
     { method: "video.current", args: [] },
+    { method: "video.getStatus", args: [] },
     { method: "video.setRate", args: [2] },
     { method: "video.setVolume", args: [0.5] },
     { method: "video.mute", args: [true] },
@@ -57,17 +63,33 @@ test("Video API 转换为稳定方法名和参数", async () => {
   ]);
 });
 
-test("OCR、AI 和 Page API 使用统一异步调用", async () => {
+test("旧版长方法名继续映射到同一实现", () => {
+  const { runtime } = buildRuntime();
+  assert.equal(runtime.video.getAll, runtime.video.all);
+  assert.equal(runtime.video.getStatus, runtime.video.status);
+  assert.equal(runtime.video.setRate, runtime.video.rate);
+  assert.equal(runtime.video.setVolume, runtime.video.volume);
+  assert.equal(runtime.book.getStatus, runtime.book.status);
+});
+
+test("OCR、问题、AI 和 Page API 使用统一异步调用", async () => {
   const fixture = buildRuntime();
   await fixture.runtime.ocr.latest();
   await fixture.runtime.ocr.capture();
   await fixture.runtime.ocr.recognize({ dataUrl: "data:image/png;base64,AA==" });
+  await fixture.runtime.qa.latest();
+  await fixture.runtime.qa.ocr();
+  await fixture.runtime.qa.voice();
+  await fixture.runtime.ai.latest();
+  await fixture.runtime.ai.history();
   await fixture.runtime.ai.ask("question");
   await fixture.runtime.ai.summary("source");
   await fixture.runtime.ai.translate("hello", "zh-CN");
   await fixture.runtime.page.info();
+  await fixture.runtime.book.status();
   assert.deepEqual(fixture.calls.map((item) => item.method), [
-    "ocr.latest", "ocr.capture", "ocr.recognize", "ai.ask", "ai.summary", "ai.translate", "page.info"
+    "ocr.latest", "ocr.capture", "ocr.recognize", "qa.latest", "qa.ocr", "qa.voice", "ai.latest", "ai.history",
+    "ai.ask", "ai.summary", "ai.translate", "page.info", "book.getStatus"
   ]);
 });
 
@@ -99,6 +121,7 @@ test("SDK API 在发送前拒绝明显错误参数", () => {
   assert.throws(() => fixture.runtime.video.setRate(0), (error) => error.code === "SDK_INVALID_ARGUMENT");
   assert.throws(() => fixture.runtime.video.setVolume(2), (error) => error.code === "SDK_INVALID_ARGUMENT");
   assert.throws(() => fixture.runtime.ai.ask(""), (error) => error.code === "SDK_INVALID_ARGUMENT");
+  assert.throws(() => fixture.runtime.ai.history(21), (error) => error.code === "SDK_INVALID_ARGUMENT");
   assert.throws(() => fixture.runtime.event.on("video.finish", null), (error) => error.code === "SDK_INVALID_ARGUMENT");
   assert.throws(() => fixture.runtime.event.on("internal.event", () => {}), (error) => error.code === "SDK_INVALID_ARGUMENT");
   assert.equal(fixture.calls.length, 0);
@@ -107,5 +130,5 @@ test("SDK API 在发送前拒绝明显错误参数", () => {
 test("全部 SDK 运行时代码不引用 chrome 或内部 Service", () => {
   const source = sdkFiles.map((file) => fs.readFileSync(path.join(root, "sdk", file), "utf8")).join("\n");
   assert.equal(/\bchrome\s*\./.test(source), false);
-  assert.equal(/WinSpeedBall(?:User|Ai|Video|Ocr|Storage)Service/.test(source), false);
+  assert.equal(/WinSpeedBall(?:User|Ai|Video|Ocr|Book|Storage)Service/.test(source), false);
 });

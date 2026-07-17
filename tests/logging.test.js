@@ -6,11 +6,11 @@ const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
 const sharedSource = fs.readFileSync(path.join(root, "shared/log-record.js"), "utf8");
-const popupSource = fs.readFileSync(path.join(root, "popup.js"), "utf8");
-const popupHtml = fs.readFileSync(path.join(root, "popup.html"), "utf8");
+const popupSource = fs.readFileSync(path.join(root, "popup/index.js"), "utf8");
+const popupHtml = fs.readFileSync(path.join(root, "popup/index.html"), "utf8");
 const storageSource = fs.readFileSync(path.join(root, "background/storage-service.js"), "utf8");
 const schemaSource = fs.readFileSync(path.join(root, "background/message-schema.js"), "utf8");
-const backgroundSource = fs.readFileSync(path.join(root, "background.js"), "utf8");
+const backgroundSource = fs.readFileSync(path.join(root, "background/service-worker.js"), "utf8");
 const privacySource = fs.readFileSync(path.join(root, "background/privacy-service.js"), "utf8");
 
 function createApi() {
@@ -101,7 +101,10 @@ test("日志面板提供运行日志、更新日志以及完整操作", () => {
   assert.match(popupHtml, /#logPanel \.log-list\{[^}]*height:auto[^}]*overflow-y:auto!important/);
   assert.match(popupHtml, /data-log-view="runtime">运行日志<\/button>/);
   assert.match(popupHtml, /data-log-view="updates">更新日志<\/button>/);
-  assert.match(popupHtml, /v3\.6\.0 · 最新更新/);
+  assert.match(popupHtml, /v3\.7\.0 · Developer Mode/);
+  assert.match(popupHtml, /v3\.7\.0 · AI 与问题获取/);
+  assert.match(popupHtml, /v3\.7\.0 · 工程结构/);
+  assert.match(popupHtml, /v3\.6\.0 · 发布摘要/);
   assert.match(popupHtml, /v3\.6\.0 · 界面与窗口/);
   assert.match(popupHtml, /v3\.6\.0 · 视频控制/);
   assert.match(popupHtml, /v3\.6\.0 · 脚本与公开接口/);
@@ -143,7 +146,7 @@ test("弹窗日志写入消息经过严格校验", () => {
   const context = { self: {}, chrome, URL, Date, String, Object, Array, Number, Math, RegExp, Set };
   vm.createContext(context);
   vm.runInContext(schemaSource, context);
-  const sender = { id: extensionId, url: chrome.runtime.getURL("popup.html") };
+  const sender = { id: extensionId, url: chrome.runtime.getURL("popup/index.html") };
   const record = createApi().create("视频", "控制成功", { 命令: "PLAY" });
   const valid = context.self.WinSpeedBallMessageSchema.parse({
     version: 1,

@@ -51,6 +51,21 @@ test("SDK Storage 执行单值和键数量配额", async () => {
   assert.equal((await fixture.service.set("script", "overflow", true)).code, "SDK_QUOTA_EXCEEDED");
 });
 
+test("SDK Storage 单个高级脚本总容量上限为 5 MiB", async () => {
+  const fixture = buildService();
+  fixture.data.sdkScriptStorage = { advanced: {} };
+  for (let index = 0; index < 79; index += 1) {
+    fixture.data.sdkScriptStorage.advanced[`part_${String(index).padStart(2, "0")}`] = "x".repeat(65500);
+  }
+  const within = await fixture.service.set("advanced", "part_79", "x".repeat(65500));
+  assert.equal(within.ok, true);
+  assert.ok(within.bytesUsed > 4 * 1024 * 1024);
+  assert.ok(within.bytesUsed <= 5 * 1024 * 1024);
+  const overflow = await fixture.service.set("advanced", "overflow", "x".repeat(2000));
+  assert.equal(overflow.code, "SDK_QUOTA_EXCEEDED");
+  assert.equal(overflow.error, "Script storage exceeds 5 MiB.");
+});
+
 test("SDK Storage 可以清理单个脚本并统计", async () => {
   const fixture = buildService();
   await fixture.service.set("one", "a", 1);

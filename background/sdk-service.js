@@ -11,8 +11,12 @@
     var consumeContext = dependencies.consumeContext;
     var validateContext = dependencies.validateContext;
     var controlTab = dependencies.controlTab;
+    var getBookStatus = dependencies.getBookStatus;
     var callAi = dependencies.callAi;
     var getLatestOcr = dependencies.getLatestOcr;
+    var getVoiceState = dependencies.getVoiceState;
+    var getLatestAi = dependencies.getLatestAi;
+    var getAiHistory = dependencies.getAiHistory;
     var readSessions = dependencies.readSessions;
     var writeSessions = dependencies.writeSessions;
     var sessionMutationQueue = Promise.resolve();
@@ -38,7 +42,8 @@
     function featureFor(method, capability) {
       if (capability.indexOf("video.") === 0) return "video.basic";
       if (capability === "ocr.read") return "ocr.basic";
-      if (capability === "ai.request") return method === "ai.summary" ? "ai.summary" : "ai.basic";
+      if (capability === "qa.read") return "ocr.basic";
+      if (capability === "ai.read" || capability === "ai.request") return method === "ai.summary" ? "ai.summary" : "ai.basic";
       return "sdk.developer";
     }
 
@@ -176,6 +181,23 @@
       };
     }
 
+    function normalizeVideoStatus(status) {
+      status = status || {};
+      var value = normalizeVideo(status);
+      value.mediaCount = Math.max(0, Number(status.mediaCount || 0));
+      value.frameCount = Math.max(0, Number(status.frameCount || 0));
+      value.remainingTime = Math.max(0, Number(status.remainingTime || Math.max(0, value.duration - value.currentTime)));
+      value.playing = status.paused === false;
+      value.playbackState = value.playing ? "playing" : "paused";
+      value.targetRate = Number(status.targetRate == null ? value.rate : status.targetRate);
+      value.rateLocked = status.rateLocked === true;
+      value.rateStable = status.rateStable !== false;
+      value.autoplay = status.continuousPlayback === true;
+      value.keepPlaying = status.keepPlaying === true;
+      value.playerType = String(status.playerType || "");
+      return value;
+    }
+
     function dispatchVideo(method, args, session) {
       var command = { type: "GET_STATUS" };
       if (method === "video.getAll" || method === "video.current") command = { type: "GET_MEDIA_LIST" };
@@ -194,7 +216,7 @@
           });
           return { ok: true, value: list.length ? normalizeVideo(list[0]) : null };
         }
-        return { ok: true, value: normalizeVideo(result) };
+        return { ok: true, value: normalizeVideoStatus(result) };
       });
     }
 
@@ -210,7 +232,79 @@
       });
     }
 
+    function normalizeBookStatus(status) {
+      status = status || {};
+      var dueAtValue = Number(status.backCoverCheckDueAt);
+      var dueAt = Number.isFinite(dueAtValue) && dueAtValue > 0 && dueAtValue <= 8640000000000000 ? dueAtValue : 0;
+      var pageJumpLabel = String(status.pageJumpLabel || "");
+      var interval = Number(status.interval);
+      var nextCheckSeconds = Number(status.backCoverNextCheckSeconds);
+      var checkIndex = Number(status.backCoverCheckIndex);
+      var sequence = (Array.isArray(status.backCoverCheckSequence) ? status.backCoverCheckSequence : []).map(Number).filter(function (seconds) {
+        return Number.isFinite(seconds) && seconds > 0;
+      }).map(function (seconds) { return Math.floor(seconds); });
+      return {
+        mode: "chaoxing",
+        detected: status.detected === true,
+        reader: String(status.reader || ""),
+        page: status.page == null ? "" : String(status.page),
+        pageType: status.pageType == null ? "" : String(status.pageType),
+        pageTypeLabel: String(status.pageTypeLabel || ""),
+        currentOption: {
+          detected: status.pageJumpDetected === true || !!pageJumpLabel,
+          value: status.pageJumpValue == null ? "" : String(status.pageJumpValue),
+          label: pageJumpLabel
+        },
+        isBackCover: status.isBackCover === true,
+        running: status.running === true,
+        intervalSeconds: Number.isFinite(interval) && interval > 0 ? interval : 0,
+        monitor: {
+          enabled: status.backCoverCheckEnabled === true,
+          reached: status.backCoverReached === true,
+          checkIndex: Number.isFinite(checkIndex) && checkIndex > 0 ? Math.floor(checkIndex) : 0,
+          nextCheckAt: dueAt > 0 ? new Date(dueAt).toISOString() : "",
+          nextCheckSeconds: Number.isFinite(nextCheckSeconds) && nextCheckSeconds > 0 ? Math.ceil(nextCheckSeconds) : 0,
+          sequenceSeconds: sequence
+        }
+      };
+    }
+
+    function dispatchBook(method, session) {
+      if (method !== "book.getStatus") return Promise.resolve(failure("SDK_METHOD_NOT_ALLOWED", "Book SDK method is not supported."));
+      if (!Number.isInteger(session.tabId)) return Promise.resolve(failure("SDK_TAB_REQUIRED", "This SDK method requires an authorized web page."));
+      if (typeof getBookStatus !== "function") return Promise.resolve(failure("SDK_DEPENDENCY_NOT_READY", "Book status service is unavailable."));
+      return validateContext(session).then(function (validated) {
+        if (!validated || validated.ok === false) return validated || failure("SDK_CONTEXT_CLOSED", "The SDK page context is closed.");
+        return new Promise(function (resolve) {
+          getBookStatus(session.tabId, function (result) {
+            if (!result) { resolve(failure("SDK_BOOK_FAILED", "Book status could not be read.")); return; }
+            if (result.ok === false && result.detected !== false) {
+              resolve(failure(result.code || "SDK_BOOK_FAILED", result.error || "Book status could not be read."));
+              return;
+            }
+            resolve({ ok: true, value: normalizeBookStatus(result) });
+          });
+        });
+      });
+    }
+
     function dispatchAi(method, args) {
+      if (method === "ai.latest") {
+        return new Promise(function (resolve) {
+          getLatestAi(function (result) {
+            if (!result || !result.ok) { resolve(result || failure("SDK_AI_READ_FAILED", "Latest AI answer could not be read.")); return; }
+            resolve({ ok: true, value: result.record || null });
+          });
+        });
+      }
+      if (method === "ai.history") {
+        return new Promise(function (resolve) {
+          getAiHistory(args[0], function (result) {
+            if (!result || !result.ok) { resolve(result || failure("SDK_AI_READ_FAILED", "AI history could not be read.")); return; }
+            resolve({ ok: true, value: Array.isArray(result.records) ? result.records : [] });
+          });
+        });
+      }
       var payload = { prompt: args[0] };
       if (method === "ai.summary") payload.task = "summary";
       if (method === "ai.translate") { payload.task = "translate"; payload.targetLanguage = args[1]; }
@@ -232,9 +326,64 @@
       });
     }
 
+    function normalizeOcrQuestion(result) {
+      result = result || {};
+      var timestamp = Number(result.time || 0);
+      return {
+        source: "ocr",
+        text: String(result.ocrText || ""),
+        status: String(result.ocrStatus || (result.ocrText ? "completed" : "idle")),
+        progress: Math.max(0, Math.min(1, Number(result.ocrProgress || 0))),
+        time: timestamp > 0 ? new Date(timestamp).toISOString() : "",
+        durationMs: 0,
+        error: String(result.ocrError || "")
+      };
+    }
+
+    function normalizeVoiceQuestion(result) {
+      result = result || {};
+      var timestamp = Number(result.updatedAt || result.startedAt || 0);
+      return {
+        source: "voice",
+        text: String(result.transcript || ""),
+        status: String(result.status || "idle"),
+        progress: Math.max(0, Math.min(1, Number(result.progress || 0))),
+        time: timestamp > 0 ? new Date(timestamp).toISOString() : "",
+        durationMs: Math.max(0, Number(result.durationMs || 0)),
+        error: String(result.error || "")
+      };
+    }
+
+    function readQuestionSource(source) {
+      return new Promise(function (resolve) {
+        var reader = source === "voice" ? getVoiceState : getLatestOcr;
+        reader(function (result) {
+          if (!result || !result.ok) { resolve(result || failure("SDK_QA_READ_FAILED", "Question record could not be read.")); return; }
+          resolve({ ok: true, value: source === "voice" ? normalizeVoiceQuestion(result) : normalizeOcrQuestion(result) });
+        });
+      });
+    }
+
+    function dispatchQa(method) {
+      if (method === "qa.ocr") return readQuestionSource("ocr");
+      if (method === "qa.voice") return readQuestionSource("voice");
+      return Promise.all([readQuestionSource("ocr"), readQuestionSource("voice")]).then(function (results) {
+        var available = results.filter(function (result) { return result && result.ok && result.value; });
+        if (!available.length) return results[0] || failure("SDK_QA_READ_FAILED", "Question record could not be read.");
+        available.sort(function (left, right) {
+          var leftTime = Date.parse(left.value.time || "") || 0;
+          var rightTime = Date.parse(right.value.time || "") || 0;
+          return rightTime - leftTime || Number(!!right.value.text) - Number(!!left.value.text);
+        });
+        return { ok: true, value: available[0].value };
+      });
+    }
+
     function dispatch(method, args, session) {
       if (method.indexOf("video.") === 0) return dispatchVideo(method, args, session);
       if (method.indexOf("page.") === 0) return dispatchPage(method, session);
+      if (method.indexOf("book.") === 0) return dispatchBook(method, session);
+      if (method.indexOf("qa.") === 0) return dispatchQa(method);
       if (method.indexOf("ai.") === 0) return dispatchAi(method, args);
       if (method.indexOf("ocr.") === 0) return dispatchOcr(method);
       if (method === "storage.get") return sdkStorage.get(session.scriptId, args[0]).then(function (result) { return result.ok ? { ok: true, value: result.value } : result; });

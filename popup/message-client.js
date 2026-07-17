@@ -122,7 +122,7 @@
       var definition = {
         id: id,
         matches: matches,
-        js: ["shadow_hook.js", "content/media-core-main.js"],
+        js: ["content/shadow-hook.js", "content/media-core-main.js"],
         runAt: "document_start",
         allFrames: true,
         persistAcrossSessions: true,
@@ -168,6 +168,167 @@
                 preloadRegistered: registered,
                 error: allowed ? "" : requestError || "未授权访问当前视频页面。",
                 mediaAccessWarning: allowed ? "" : "跨域视频框架未授权，部分视频仍可能无法控制。"
+              }));
+            });
+          });
+        });
+      });
+    });
+  }
+
+  function discoverBookFrameOrigins(tabId, currentOriginPattern) {
+    return new Promise(function (resolve) {
+      var discoveredUrls = [];
+      var hasNavigationFrames = !!(chrome.webNavigation && typeof chrome.webNavigation.getAllFrames === "function");
+      var hasDomFrames = !!(chrome.scripting && typeof chrome.scripting.executeScript === "function");
+      var pending = (hasNavigationFrames ? 1 : 0) + (hasDomFrames ? 1 : 0);
+      var finished = false;
+
+      function addUrl(value) {
+        value = String(value || "");
+        if (value && discoveredUrls.indexOf(value) < 0) discoveredUrls.push(value);
+      }
+
+      function finishPart() {
+        pending -= 1;
+        if (pending > 0 || finished) return;
+        finished = true;
+        var patterns = [];
+        discoveredUrls.forEach(function (url) {
+          var pattern = originPatternFromUrl(url);
+          if (pattern && pattern !== currentOriginPattern && patterns.indexOf(pattern) < 0) patterns.push(pattern);
+        });
+        if (/chaoxing\.com\/\*$/i.test(String(currentOriginPattern || "")) || patterns.some(function (pattern) { return /chaoxing\.com\/\*$/i.test(pattern); })) {
+          patterns = patterns.filter(function (pattern) { return !/(^|\.)chaoxing\.com\/\*$/i.test(pattern); });
+          patterns.unshift("*://*.chaoxing.com/*", "*://*.sslibrary.com/*");
+        }
+        resolve(patterns.slice(0, 40));
+      }
+
+      if (hasNavigationFrames) {
+        try {
+          chrome.webNavigation.getAllFrames({ tabId: tabId }, function (frames) {
+            if (!chrome.runtime.lastError) {
+              (frames || []).forEach(function (frame) { addUrl(frame && frame.url); });
+            }
+            finishPart();
+          });
+        } catch (error) { finishPart(); }
+      }
+
+      if (hasDomFrames) {
+        try {
+          chrome.scripting.executeScript({
+            target: { tabId: tabId, allFrames: true },
+            func: function () {
+              return Array.prototype.slice.call(document.querySelectorAll("iframe,frame")).filter(function (frame) {
+                var rect = frame.getBoundingClientRect ? frame.getBoundingClientRect() : { width: 0, height: 0 };
+                var semantic = [frame.id, frame.className, frame.name, frame.title, frame.src, frame.getAttribute("module"), frame.getAttribute("type"), frame.getAttribute("data")].join(" ");
+                return Math.max(0, rect.width) * Math.max(0, rect.height) >= 12000 || /(book|ebook|reader|read|chapter|course|card|ananas|mooc|chaoxing|\u56fe\u4e66|\u9605\u8bfb)/i.test(semantic);
+              }).reduce(function (urls, frame) {
+                var sources = [String(frame.src || frame.getAttribute("src") || "")];
+                var moduleName = String(frame.getAttribute("module") || "").toLowerCase();
+                var moduleData = String(frame.getAttribute("data") || "");
+                if (moduleData) {
+                  try {
+                    var parsed = JSON.parse(moduleData);
+                    if (parsed && parsed.readurl) sources.push(String(parsed.readurl));
+                    if (parsed && parsed.pdgurl) sources.push(String(parsed.pdgurl));
+                  } catch (error) {
+                    var readUrlMatch = moduleData.match(/["']readurl["']\s*:\s*["']([^"']+)/i);
+                    var pdgUrlMatch = moduleData.match(/["']pdgurl["']\s*:\s*["']([^"']+)/i);
+                    if (readUrlMatch) sources.push(readUrlMatch[1].replace(/&amp;/g, "&"));
+                    if (pdgUrlMatch) sources.push(pdgUrlMatch[1].replace(/&amp;/g, "&"));
+                  }
+                }
+                if (moduleName === "insertbook" && sources.every(function (source) { return !source; })) sources.push("https://resapi.chaoxing.com/");
+                sources.filter(Boolean).forEach(function (source) {
+                  try { urls.push(new URL(source, document.baseURI).href); } catch (error) { urls.push(source); }
+                });
+                return urls;
+              }, []).slice(0, 48);
+            }
+          }, function (results) {
+            if (!chrome.runtime.lastError) {
+              (results || []).forEach(function (entry) {
+                (Array.isArray(entry && entry.result) ? entry.result : []).forEach(addUrl);
+              });
+            }
+            finishPart();
+          });
+        } catch (error) { finishPart(); }
+      }
+
+      if (!pending) resolve([]);
+    });
+  }
+
+  function registerBookPreload(originPatterns) {
+    return new Promise(function (resolve) {
+      var scripting = chrome.scripting;
+      if (!scripting || typeof scripting.getRegisteredContentScripts !== "function" || typeof scripting.registerContentScripts !== "function") {
+        resolve(false);
+        return;
+      }
+      var id = "winspeedball-book-preload";
+      var matches = Array.from(new Set((originPatterns || []).filter(Boolean))).sort();
+      if (!matches.length) { resolve(false); return; }
+      var definition = {
+        id: id,
+        matches: matches,
+        js: ["content/book-core-main.js"],
+        runAt: "document_start",
+        allFrames: true,
+        persistAcrossSessions: true,
+        world: "MAIN",
+        matchOriginAsFallback: true
+      };
+      scripting.getRegisteredContentScripts({ ids: [id] }, function (scripts) {
+        var readError = chrome.runtime.lastError && chrome.runtime.lastError.message;
+        if (readError) { resolve(false); return; }
+        var existing = scripts && scripts[0];
+        definition.matches = existing && Array.isArray(existing.matches)
+          ? Array.from(new Set(existing.matches.concat(matches))).sort()
+          : matches;
+        var finish = function () { resolve(!(chrome.runtime.lastError && chrome.runtime.lastError.message)); };
+        if (existing && typeof scripting.updateContentScripts === "function") scripting.updateContentScripts([definition], finish);
+        else scripting.registerContentScripts([definition], finish);
+      });
+    });
+  }
+
+  function ensureBookAccess(site) {
+    if (!site || !site.ok || !site.originPattern) return Promise.resolve(site || { ok: false, error: "\u5f53\u524d\u9875\u9762\u4e0d\u652f\u6301\u56fe\u4e66\u63a7\u5236\u3002" });
+    return discoverBookFrameOrigins(site.tabId, site.originPattern).then(function (frameOrigins) {
+      var requested = Array.from(new Set([site.originPattern].concat(frameOrigins).filter(Boolean)));
+      return new Promise(function (resolve) {
+        if (!chrome.permissions || typeof chrome.permissions.contains !== "function" || typeof chrome.permissions.request !== "function") {
+          resolve(Object.assign({}, site, { ok: false, error: "\u5f53\u524d\u6d4f\u89c8\u5668\u4e0d\u652f\u6301\u56fe\u4e66\u6846\u67b6\u6388\u6743\u3002" }));
+          return;
+        }
+        chrome.permissions.contains({ origins: requested }, function (contains) {
+          var containsError = chrome.runtime.lastError && chrome.runtime.lastError.message;
+          if (containsError) {
+            resolve(Object.assign({}, site, { ok: false, error: containsError, bookFrameOrigins: frameOrigins }));
+            return;
+          }
+          if (contains) {
+            registerBookPreload(requested).then(function (registered) {
+              resolve(Object.assign({}, site, { ok: true, granted: true, frameAccessGranted: true, bookFrameOrigins: frameOrigins, preloadRegistered: registered }));
+            });
+            return;
+          }
+          chrome.permissions.request({ origins: requested }, function (granted) {
+            var requestError = chrome.runtime.lastError && chrome.runtime.lastError.message;
+            var allowed = !requestError && granted;
+            registerBookPreload(allowed ? requested : []).then(function (registered) {
+              resolve(Object.assign({}, site, {
+                ok: allowed,
+                granted: allowed,
+                frameAccessGranted: allowed,
+                bookFrameOrigins: frameOrigins,
+                preloadRegistered: registered,
+                error: allowed ? "" : requestError || "\u672a\u6388\u6743\u8bbf\u95ee\u5b66\u4e60\u901a\u56fe\u4e66\u9605\u8bfb\u6846\u67b6\u3002"
               }));
             });
           });
@@ -241,6 +402,9 @@
     ensureMediaAccess: ensureMediaAccess,
     discoverMediaFrameOrigins: discoverMediaFrameOrigins,
     registerMediaPreload: registerMediaPreload,
+    ensureBookAccess: ensureBookAccess,
+    discoverBookFrameOrigins: discoverBookFrameOrigins,
+    registerBookPreload: registerBookPreload,
     getServiceOriginPattern: getServiceOriginPattern,
     ensureServiceOrigin: ensureServiceOrigin
   };

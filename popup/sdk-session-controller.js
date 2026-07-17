@@ -31,7 +31,7 @@
 
     function requiresSite(capabilities) {
       return capabilities.some(function (capability) {
-        return capability === "video.read" || capability === "video.control" || capability === "page.read" || capability === "ocr.read";
+        return capability === "video.read" || capability === "video.control" || capability === "page.read" || capability === "book.read" || capability === "ocr.read";
       });
     }
 

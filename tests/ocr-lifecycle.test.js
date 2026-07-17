@@ -43,6 +43,13 @@ function buildService(options = {}) {
   const context = {
     self: {
       WinSpeedBallStorageService: storage,
+      WinSpeedBallTextNormalizer: {
+        normalize(value) {
+          return typeof options.normalizeText === "function"
+            ? options.normalizeText(String(value || ""))
+            : String(value || "").trim();
+        }
+      },
       WinSpeedBallAiService: {
         call(payload, callback) {
           aiCallCount += 1;
@@ -92,6 +99,17 @@ test("OCR 完成或失败后关闭空闲离屏文档", async () => {
   await flush();
   assert.equal(failed.data.ocrJobStatus, "failed");
   assert.equal(failed.getCloseCount(), 1);
+});
+
+test("OCR 结果在保存和显示前统一执行中英文正规化", async () => {
+  const fixture = buildService({
+    normalizeText(value) {
+      return value.replace(/繁體/g, "繁体").replace(/題/g, "题").replace(/韓文/g, "").trim();
+    }
+  });
+  fixture.service.handleComplete({ sourceTime: 100, text: "繁體題目 韓文" });
+  await flush();
+  assert.equal(fixture.data.manualOcrText, "繁体题目");
 });
 
 test("隐私清理取消 OCR 后迟到结果不能回写", async () => {

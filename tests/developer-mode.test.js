@@ -44,7 +44,7 @@ test("Developer Mode 默认关闭但能力可用", async () => {
   assert.equal(status.available, true);
   assert.equal(status.runtimeReady, true);
   assert.equal(status.runtimeStage, "beta");
-  assert.equal(status.sdkVersion, "0.1.0-beta");
+  assert.equal(status.sdkVersion, "3.7.0-beta");
 });
 
 test("开启 Developer Mode 必须明确确认", async () => {
@@ -92,7 +92,7 @@ test("Developer Mode 消息只允许受信弹窗并校验确认", () => {
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(root, "background/message-schema.js"), "utf8"), context);
   const schema = context.self.WinSpeedBallMessageSchema;
-  const sender = { id: "extension-id", url: "chrome-extension://extension-id/popup.html" };
+  const sender = { id: "extension-id", url: "chrome-extension://extension-id/popup/index.html" };
   const valid = schema.parse({ version: 1, action: "setDeveloperMode", source: "popup", requestId: "developer-mode-1", payload: { enabled: true, confirmed: true } }, sender);
   assert.equal(valid.ok, true);
   const unconfirmed = schema.parse({ version: 1, action: "setDeveloperMode", source: "popup", requestId: "developer-mode-2", payload: { enabled: true, confirmed: false } }, sender);

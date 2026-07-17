@@ -49,7 +49,7 @@
         name: String(value.name || metadata.name || "未命名 SDK 脚本").trim().slice(0, 80) || "未命名 SDK 脚本",
         code: value.code,
         savedAt: Number(value.savedAt || now()),
-        sdkVersion: String(value.sdkVersion || contracts.SDK_VERSION),
+        sdkVersion: contracts.SDK_VERSION,
         capabilities: contracts.normalizeCapabilities(value.capabilities || metadata.capabilities)
       };
     }
@@ -117,6 +117,17 @@
       return persist().then(function () { return Object.assign({}, draft); });
     }
 
+    function duplicateDraft(id) {
+      var source = getDraft(id);
+      if (!source) return Promise.reject(new Error("SDK 草稿不存在。"));
+      var duplicateName = (source.name || "未命名 SDK 脚本") + " 副本";
+      var code = source.code;
+      if (/^\s*\/\/\s*@name\s+.+$/m.test(code)) {
+        code = code.replace(/^(\s*\/\/\s*@name\s+).+$/m, "$1" + duplicateName);
+      }
+      return createDraft(code);
+    }
+
     function selectDraft(id) {
       if (!drafts.some(function (draft) { return draft.id === id; })) return Promise.reject(new Error("SDK 草稿不存在。"));
       activeId = id;
@@ -154,6 +165,7 @@
       analyze: analyze,
       createDraft: createDraft,
       saveDraft: saveDraft,
+      duplicateDraft: duplicateDraft,
       selectDraft: selectDraft,
       removeDraft: removeDraft,
       getActive: getActive,

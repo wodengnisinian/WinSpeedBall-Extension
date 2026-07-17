@@ -2,29 +2,34 @@
   "manifest_version": 3,
   "minimum_chrome_version": "135",
   "name": "WinSpeedBall",
-  "version": "3.6.0",
-  "version_name": "3.6.0 Developer Beta",
-  "description": "Chromium AI learning platform with video tools, local OCR, configurable AI, sandboxed SDK, and Developer Mode.",
-  "permissions": ["activeTab", "scripting", "storage", "alarms", "offscreen", "userScripts"],
-  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "version": "3.7.0",
+  "version_name": "3.7.0 Developer Beta",
+  "description": "Chromium AI learning platform with video tools, local OCR and Whisper speech recognition, configurable AI, sandboxed SDK, and Developer Mode.",
+  "permissions": ["activeTab", "scripting", "storage", "alarms", "offscreen", "tabCapture", "userScripts", "webNavigation"],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*",
+    "*://*.chaoxing.com/*",
+    "*://*.sslibrary.com/*"
+  ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background/service-worker.js"
   },
   "action": {
     "default_icon": {
-      "16": "icons/icon-blue-16.png",
-      "32": "icons/icon-blue-32.png",
-      "48": "icons/icon-blue-48.png",
-      "128": "icons/icon-blue-128.png"
+      "16": "assets/icons/icon-blue-16.png",
+      "32": "assets/icons/icon-blue-32.png",
+      "48": "assets/icons/icon-blue-48.png",
+      "128": "assets/icons/icon-blue-128.png"
     },
-    "default_popup": "popup.html",
+    "default_popup": "popup/index.html",
     "default_title": "WinSpeedBall"
   },
   "icons": {
-    "16": "icons/icon-blue-16.png",
-    "32": "icons/icon-blue-32.png",
-    "48": "icons/icon-blue-48.png",
-    "128": "icons/icon-blue-128.png"
+    "16": "assets/icons/icon-blue-16.png",
+    "32": "assets/icons/icon-blue-32.png",
+    "48": "assets/icons/icon-blue-48.png",
+    "128": "assets/icons/icon-blue-128.png"
   },
   "commands": {
     "region-capture": {
@@ -37,6 +42,6 @@
     "sandbox": "sandbox allow-scripts; script-src 'self' 'unsafe-inline' 'unsafe-eval'; worker-src blob:; object-src 'none'"
   },
   "sandbox": {
-    "pages": ["script_workspace.html", "sdk/script-runner.html"]
+    "pages": ["workspace/index.html", "sdk/script-runner.html"]
   }
 }

@@ -32,6 +32,27 @@
       return contracts.parseMetadata(byId("developerScriptEditor").value || "");
     }
 
+    function updateEditorStats() {
+      var code = byId("developerScriptEditor").value || "";
+      var metadata = contracts.parseMetadata(code);
+      var active = draftStore.getActive();
+      byId("developerLineCount").textContent = String(code ? code.split(/\r?\n/).length : 0);
+      byId("developerCharacterCount").textContent = String(code.length);
+      byId("developerDeclaredCapabilityCount").textContent = String(metadata.capabilities.length);
+      byId("developerSaveState").textContent = active && active.code === code ? "已保存" : "未保存";
+    }
+
+    function updateApiCapabilityPreview() {
+      var method = byId("developerApiMethod").value;
+      var args = [];
+      try { args = JSON.parse(byId("developerApiArgs").value || "[]"); }
+      catch (error) {}
+      var capability = contracts.requiredCapability(method, Array.isArray(args) ? args : []);
+      byId("developerApiCapability").textContent = capability
+        ? "所需能力：" + capability
+        : (method === "event.on" ? "所需能力：请先填写有效事件名称" : "所需能力：-");
+    }
+
     function renderDocumentation() {
       var capabilityList = byId("developerCapabilityList");
       var apiList = byId("developerApiList");
@@ -47,22 +68,28 @@
         item.appendChild(title);
         capabilityList.appendChild(item);
       });
-      Object.keys(contracts.METHOD_CAPABILITIES).forEach(function (method) {
+      var publicMethods = contracts.PUBLIC_METHODS || Object.keys(contracts.METHOD_CAPABILITIES).reduce(function (result, method) {
+        result[method] = method;
+        return result;
+      }, {});
+      Object.keys(publicMethods).forEach(function (publicMethod) {
+        var method = publicMethods[publicMethod];
         var capability = contracts.METHOD_CAPABILITIES[method];
         var item = document.createElement("div");
         var title = document.createElement("strong");
         var description = document.createElement("span");
         var option = document.createElement("option");
         item.className = "developer-item";
-        title.textContent = "WSB." + method;
+        title.textContent = "WSB." + publicMethod;
         description.textContent = "需要能力：" + capability;
         option.value = method;
-        option.textContent = method;
+        option.textContent = publicMethod;
         item.appendChild(title);
         item.appendChild(description);
         apiList.appendChild(item);
         methodSelect.appendChild(option);
       });
+      updateApiCapabilityPreview();
     }
 
     function renderStatus(status) {
@@ -118,6 +145,7 @@
 
     function analyzeDraft() {
       var code = byId("developerScriptEditor").value || "";
+      updateEditorStats();
       if (code.length > 200000) {
         var tooLarge = { ok: false, code: "SCRIPT_TOO_LARGE", error: "脚本超过 200000 字符。" };
         output("developerScriptOutput", tooLarge);
@@ -130,6 +158,8 @@
         mode: classification.mode,
         name: metadata.name || "未命名",
         version: metadata.version || "未声明",
+        lineCount: code ? code.split(/\r?\n/).length : 0,
+        characterCount: code.length,
         capabilities: metadata.capabilities,
         legacyPermissions: metadata.legacyPermissions,
         unsupportedCapabilities: metadata.unsupportedCapabilities
@@ -194,6 +224,7 @@
 
     function clearDraft() {
       byId("developerScriptEditor").value = "";
+      updateEditorStats();
       output("developerScriptOutput", "编辑器已清空，点击“保存草稿”后才会覆盖当前草稿。");
     }
 
@@ -204,6 +235,18 @@
         output("developerScriptOutput", { ok: true, message: "已新建 SDK 草稿。", draftId: draft.id });
       }).catch(function (error) {
         output("developerScriptOutput", { ok: false, error: error.message || String(error) });
+      });
+    }
+
+    function duplicateDraft() {
+      if (sessionController.isActive()) { output("developerScriptOutput", { ok: false, error: "请先停止当前 SDK 会话。" }); return; }
+      var draftId = byId("developerDraftSelect").value;
+      if (!draftId) { output("developerScriptOutput", { ok: false, error: "请先保存当前草稿。" }); return; }
+      draftsLoaded.then(function () { return draftStore.duplicateDraft(draftId); }).then(function (draft) {
+        renderDrafts(draftStore.snapshot(), false);
+        output("developerScriptOutput", { ok: true, message: "SDK 草稿副本已创建。", draftId: draft.id, name: draft.name });
+      }).catch(function (error) {
+        output("developerScriptOutput", { ok: false, code: error.code || "DRAFT_DUPLICATE_FAILED", error: error.message || String(error) });
       });
     }
 
@@ -322,6 +365,7 @@
       byId("saveDeveloperDraftBtn").addEventListener("click", saveDraft);
       byId("clearDeveloperDraftBtn").addEventListener("click", clearDraft);
       byId("newDeveloperDraftBtn").addEventListener("click", createDraft);
+      byId("duplicateDeveloperDraftBtn").addEventListener("click", duplicateDraft);
       byId("deleteDeveloperDraftBtn").addEventListener("click", deleteDraft);
       byId("developerDraftSelect").addEventListener("change", selectDraft);
       byId("importDeveloperDraftBtn").addEventListener("click", function () { byId("developerDraftFileInput").click(); });
@@ -331,6 +375,15 @@
       });
       byId("exportDeveloperDraftBtn").addEventListener("click", exportDraft);
       byId("runDeveloperApiTestBtn").addEventListener("click", runContractTest);
+      byId("developerScriptEditor").addEventListener("input", updateEditorStats);
+      byId("developerScriptEditor").addEventListener("keydown", function (event) {
+        if ((event.ctrlKey || event.metaKey) && String(event.key || "").toLowerCase() === "s") {
+          event.preventDefault();
+          saveDraft();
+        }
+      });
+      byId("developerApiMethod").addEventListener("change", updateApiCapabilityPreview);
+      byId("developerApiArgs").addEventListener("input", updateApiCapabilityPreview);
       loadDraft();
     }
 

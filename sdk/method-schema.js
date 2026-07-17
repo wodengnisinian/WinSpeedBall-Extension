@@ -8,7 +8,7 @@
 
   function validate(method, args) {
     if (!Array.isArray(args)) return invalid("SDK arguments must be an array.");
-    if (["video.getAll", "video.current", "video.getStatus", "video.play", "video.pause", "ocr.latest", "ocr.capture", "page.info", "page.text", "page.title", "page.url"].indexOf(method) >= 0) return noArgs(args);
+    if (["video.getAll", "video.current", "video.getStatus", "video.play", "video.pause", "ocr.latest", "ocr.capture", "qa.latest", "qa.ocr", "qa.voice", "ai.latest", "page.info", "page.text", "page.title", "page.url", "book.getStatus"].indexOf(method) >= 0) return noArgs(args);
     if (method === "video.setRate") return args.length === 1 && Number.isFinite(args[0]) && args[0] >= 0.25 && args[0] <= 16 ? ok() : invalid("Playback rate must be between 0.25 and 16.");
     if (method === "video.setVolume") return args.length === 1 && Number.isFinite(args[0]) && args[0] >= 0 && args[0] <= 1 ? ok() : invalid("Volume must be between 0 and 1.");
     if (method === "video.mute") return args.length === 1 && typeof args[0] === "boolean" ? ok() : invalid("Muted state must be a boolean.");
@@ -20,6 +20,7 @@
       return ok();
     }
     if (method === "ai.ask" || method === "ai.summary") return args.length === 1 ? text(args[0], 50000, "AI text") : invalid("AI method requires one text argument.");
+    if (method === "ai.history") return args.length === 0 || (args.length === 1 && Number.isInteger(args[0]) && args[0] >= 1 && args[0] <= 20) ? ok() : invalid("AI history limit must be between 1 and 20.");
     if (method === "ai.translate") {
       if (args.length !== 2) return invalid("Translate requires text and target language.");
       var source = text(args[0], 50000, "Translation text");

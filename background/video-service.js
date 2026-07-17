@@ -146,13 +146,13 @@
 
           chrome.scripting.executeScript({
             target: { tabId: tabId, allFrames: true },
-            files: ["shadow_hook.js"],
+            files: ["content/shadow-hook.js"],
             world: "MAIN"
           }, function () {
             lastErrorMessage();
             chrome.scripting.executeScript({
               target: { tabId: tabId, allFrames: true },
-              files: ["content/player-adapters.js", "content_script.js"]
+              files: ["content/player-adapters.js", "content/index.js"]
             }, function () {
               var injectError = lastErrorMessage();
               if (injectError) {
@@ -232,7 +232,7 @@
             chrome.scripting.executeScript({
               target: { tabId: tabId, allFrames: true },
               world: "MAIN",
-              files: ["shadow_hook.js", "content/media-core-main.js"]
+              files: ["content/shadow-hook.js", "content/media-core-main.js"]
             }, function () {
               var injectError = lastErrorMessage();
               if (injectError) {

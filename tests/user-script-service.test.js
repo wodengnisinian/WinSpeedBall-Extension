@@ -88,18 +88,35 @@ test("并发用户脚本同步被串行化且最终状态采用最后请求", as
   assert.deepEqual(Array.from(fixture.registry.keys()), ["wsb-user-three"]);
 });
 
-test("声明 video.read 的普通用户脚本可以调用公开 WSB.video.getStatus", async () => {
+test("长脚本 ID 不会因截断而共享注册 ID 或隔离世界", async () => {
+  const fixture = buildService();
+  const sharedPrefix = "a".repeat(48);
+  await fixture.service.sync([
+    storedScript(sharedPrefix + "-one"),
+    storedScript(sharedPrefix + "-two")
+  ]);
+  const registrationIds = Array.from(fixture.registry.keys());
+  const worldIds = fixture.calls.configure.map((item) => item.worldId);
+  assert.equal(registrationIds.length, 2);
+  assert.equal(new Set(registrationIds).size, 2);
+  assert.equal(new Set(worldIds).size, 2);
+  assert.equal(registrationIds.every((id) => id.length <= 57), true);
+  assert.equal(worldIds.every((id) => id.length <= 58), true);
+});
+
+test("声明 video.read 的普通用户脚本可以调用精简 status 接口", async () => {
   const fixture = buildService();
   const code = [
     "// ==UserScript==",
     "// @wsb-capability video.read",
     "// ==/UserScript==",
-    "WSB.video.getStatus();"
+    "WSB.video.status();"
   ].join("\n");
   await fixture.service.sync([storedScript("video-status", code)]);
   const registered = fixture.registry.get("wsb-user-video-status");
   assert.ok(registered);
   assert.match(registered.js[0].code, /var WSB=Object\.freeze/);
+  assert.match(registered.js[0].code, /status:function\(\)/);
   assert.match(registered.js[0].code, /getStatus:function\(\)/);
   assert.match(registered.js[0].code, /WSB_USER_SCRIPT_BRIDGE/);
   assert.equal(fixture.calls.configure[0].messaging, true);

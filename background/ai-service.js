@@ -129,6 +129,22 @@
     ];
   }
 
+  function normalizeReply(result) {
+    if (!result || result.ok !== true) return result;
+    var normalizer = global.WinSpeedBallTextNormalizer;
+    if (!normalizer || typeof normalizer.normalize !== "function") return result;
+    var content = normalizer.normalize(result.content || "");
+    if (!content) {
+      return Object.assign({}, result, {
+        ok: false,
+        code: "EMPTY_SUPPORTED_TEXT",
+        error: "AI 回复中没有可显示的中文或英文内容。",
+        retryable: false
+      });
+    }
+    return Object.assign({}, result, { content: content });
+  }
+
   function saveAutoOcrResult(payload, result, callback) {
     var sourceTime = Number(payload.autoOcrSourceTime || 0);
     if (!sourceTime || !result.ok) {
@@ -151,9 +167,10 @@
   function call(payload, callback) {
     payload = payload || {};
     readState(function (state) {
-      var config = state.configs[state.provider];
+      var providerId = providers.has(payload.provider) ? String(payload.provider).toLowerCase() : state.provider;
+      var config = state.configs[providerId];
       var provider = providers.create({
-        provider: state.provider,
+        provider: providerId,
         apiKey: config.apiKey,
         baseUrl: config.baseUrl,
         model: config.model
@@ -166,6 +183,7 @@
       else request = provider.chat({ messages: buildMessages(payload), temperature: options.temperature });
 
       Promise.resolve(request).then(function (result) {
+        result = normalizeReply(result);
         if (!result.providerLabel) result.providerLabel = provider.label;
         saveAutoOcrResult(payload, result, callback);
       }).catch(function (error) {
@@ -238,10 +256,114 @@
     return providers.buildEndpoint(providers.normalizeBaseUrl(baseUrl, providers.getDefinition("deepseek").defaultBaseUrl), "chat/completions", "deepseek");
   }
 
+  function safeText(value, maxLength) {
+    return String(value || "").slice(0, maxLength);
+  }
+
+  function publicRecord(value, providerId, source, answerLimit) {
+    value = isObject(value) ? value : {};
+    var originalAnswer = String(value.answer || value.content || "");
+    var timestamp = Number(value.time || value.createdAt || value.updatedAt || 0);
+    return {
+      provider: safeText(value.provider || providerId, 32),
+      model: safeText(value.model, 128),
+      mode: safeText(value.mode || "custom", 32),
+      question: safeText(value.question || value.prompt, 50000),
+      answer: originalAnswer.slice(0, answerLimit),
+      timeValue: Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0,
+      source: source,
+      truncated: originalAnswer.length > answerLimit
+    };
+  }
+
+  function collectPublicRecords(data, answerLimit) {
+    data = isObject(data) ? data : {};
+    var records = [];
+    var groups = isObject(data.aiQuestionHistoryByProvider) ? data.aiQuestionHistoryByProvider : null;
+    if (groups) {
+      Object.keys(groups).forEach(function (providerId) {
+        (Array.isArray(groups[providerId]) ? groups[providerId] : []).slice(0, 30).forEach(function (item) {
+          records.push(publicRecord(item, providerId, "history", answerLimit));
+        });
+      });
+    } else if (Array.isArray(data.aiQuestionHistory)) {
+      data.aiQuestionHistory.slice(0, 30).forEach(function (item) {
+        records.push(publicRecord(item, data.aiSelectedProvider || data.aiProvider, "history", answerLimit));
+      });
+    }
+
+    if (String(data.manualAiResponse || "").trim()) {
+      records.push(publicRecord({
+        provider: data.aiProvider,
+        question: data.manualAiPrompt,
+        answer: data.manualAiResponse,
+        time: data.manualAiSourceTime
+      }, "", "ocr-auto", answerLimit));
+    }
+
+    var selectedProvider = String(data.aiSelectedProvider || data.aiProvider || "deepseek");
+    var workspaces = isObject(data.aiProviderWorkspaces) ? data.aiProviderWorkspaces : {};
+    var workspace = isObject(workspaces[selectedProvider]) ? workspaces[selectedProvider] : null;
+    if (workspace && String(workspace.answer || "").trim()) {
+      records.push(publicRecord(workspace, selectedProvider, "workspace", answerLimit));
+    }
+
+    var unique = [];
+    var seen = Object.create(null);
+    records.forEach(function (record, index) {
+      if (!record.answer.trim()) return;
+      var key = [record.provider, record.question, record.answer].join("\u0000");
+      if (seen[key]) return;
+      seen[key] = true;
+      record.order = index;
+      unique.push(record);
+    });
+    unique.sort(function (left, right) {
+      return right.timeValue - left.timeValue || left.order - right.order;
+    });
+    return unique.map(function (record) {
+      var output = {
+        provider: record.provider,
+        model: record.model,
+        mode: record.mode,
+        question: record.question,
+        answer: record.answer,
+        time: record.timeValue ? new Date(record.timeValue).toISOString() : "",
+        source: record.source,
+        truncated: record.truncated
+      };
+      return output;
+    });
+  }
+
+  function readPublicRecords(answerLimit, callback) {
+    storage.get([
+      "aiProvider", "aiSelectedProvider", "aiProviderWorkspaces", "aiQuestionHistoryByProvider", "aiQuestionHistory",
+      "manualAiSourceTime", "manualAiPrompt", "manualAiResponse"
+    ], function (data) {
+      callback({ ok: true, records: collectPublicRecords(data, answerLimit) });
+    });
+  }
+
+  function getLatest(callback) {
+    readPublicRecords(2 * 1024 * 1024, function (result) {
+      callback({ ok: true, record: result.records[0] || null });
+    });
+  }
+
+  function getHistory(limit, callback) {
+    limit = Math.max(1, Math.min(20, Math.floor(Number(limit || 10))));
+    readPublicRecords(200000, function (result) {
+      callback({ ok: true, records: result.records.slice(0, limit) });
+    });
+  }
+
   global.WinSpeedBallAiService = {
     call: call,
     saveSettings: saveSettings,
     getConfig: getConfig,
+    getLatest: getLatest,
+    getHistory: getHistory,
     buildChatCompletionsUrl: buildChatCompletionsUrl
   };
 })(self);

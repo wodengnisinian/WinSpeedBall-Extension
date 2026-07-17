@@ -5,8 +5,8 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
-const popup = fs.readFileSync(path.join(root, "popup.js"), "utf8");
-const workspace = fs.readFileSync(path.join(root, "script_workspace.js"), "utf8");
+const popup = fs.readFileSync(path.join(root, "popup/index.js"), "utf8");
+const workspace = fs.readFileSync(path.join(root, "workspace/index.js"), "utf8");
 
 function loadSchema() {
   const context = {
@@ -26,7 +26,7 @@ function loadSchema() {
 
 test("旧脚本工作区每次运行先重载页面，再建立私有 MessageChannel", () => {
   assert.match(popup, /closeScriptWorkspaceChannel\(\);[\s\S]*pendingWorkspaceScript\s*=\s*\{/);
-  assert.match(popup, /frame\.src\s*=\s*chrome\.runtime\.getURL\("script_workspace\.html"\)/);
+  assert.match(popup, /frame\.src\s*=\s*chrome\.runtime\.getURL\("workspace\/index\.html"\)/);
   assert.match(popup, /var channel\s*=\s*new MessageChannel\(\)/);
   assert.match(popup, /workspaceFrame\.contentWindow\.postMessage\([\s\S]*type:\s*"INIT"[\s\S]*\[channel\.port2\]\)/);
   assert.match(popup, /data\.type\s*===\s*"READY"[\s\S]*postToScriptWorkspace\("RUN_SCRIPT_UI"/);
@@ -69,7 +69,7 @@ test("START、NEXT、SET_INTERVAL 必须声明并确认 automation 权限", () =
 
 test("消息 schema 接受已确认 automation，拒绝未知权限和未确认权限", () => {
   const schema = loadSchema();
-  const sender = { id: "extension-id", url: "chrome-extension://extension-id/popup.html" };
+  const sender = { id: "extension-id", url: "chrome-extension://extension-id/popup/index.html" };
   const base = {
     version: 1,
     source: "popup",

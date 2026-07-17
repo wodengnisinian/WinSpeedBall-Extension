@@ -21,12 +21,20 @@ test("SDK 方法参数范围被严格校验", () => {
   assert.equal(schema.validate("video.setVolume", [0.5]).ok, true);
   assert.equal(schema.validate("video.mute", ["yes"]).ok, false);
   assert.equal(schema.validate("page.text", ["extra"]).ok, false);
+  assert.equal(schema.validate("book.getStatus", []).ok, true);
+  assert.equal(schema.validate("book.getStatus", ["extra"]).ok, false);
+  assert.equal(schema.validate("qa.latest", []).ok, true);
+  assert.equal(schema.validate("qa.voice", ["extra"]).ok, false);
 });
 
 test("AI、OCR、事件和存储参数被限制", () => {
   const schema = loadSchema();
   assert.equal(schema.validate("ai.translate", ["hello", "zh-CN"]).ok, true);
   assert.equal(schema.validate("ai.ask", [""]).ok, false);
+  assert.equal(schema.validate("ai.latest", []).ok, true);
+  assert.equal(schema.validate("ai.history", []).ok, true);
+  assert.equal(schema.validate("ai.history", [20]).ok, true);
+  assert.equal(schema.validate("ai.history", [21]).ok, false);
   assert.equal(schema.validate("ocr.recognize", [{ dataUrl: "data:image/png;base64,AA==" }]).ok, true);
   assert.equal(schema.validate("ocr.recognize", [{ dataUrl: "https://example.com/image.png" }]).ok, false);
   assert.equal(schema.validate("event.on", ["video.finish"]).ok, true);

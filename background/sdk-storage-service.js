@@ -4,7 +4,7 @@
   var STORAGE_KEY = "sdkScriptStorage";
   var MAX_KEYS = 100;
   var MAX_VALUE_BYTES = 64 * 1024;
-  var MAX_SCRIPT_BYTES = 256 * 1024;
+  var MAX_SCRIPT_BYTES = 5 * 1024 * 1024;
   var storage = global.WinSpeedBallStorageService;
   var mutationQueue = Promise.resolve();
 
@@ -86,7 +86,7 @@
       }
       namespace[key] = cloned.value;
       var namespaceSize = utf8ByteLength(JSON.stringify(namespace));
-      if (namespaceSize > MAX_SCRIPT_BYTES) return { ok: false, code: "SDK_QUOTA_EXCEEDED", error: "Script storage exceeds 256 KB." };
+      if (namespaceSize > MAX_SCRIPT_BYTES) return { ok: false, code: "SDK_QUOTA_EXCEEDED", error: "Script storage exceeds 5 MiB." };
       var next = Object.assign({}, all);
       next[scriptId] = namespace;
       return writeAll(next).then(function (saved) {

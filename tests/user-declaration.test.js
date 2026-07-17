@@ -51,7 +51,7 @@ function buildServices(initialLocal) {
       runtime: {
         id: "extension-id",
         lastError: null,
-        getManifest: () => ({ version: "3.4.0" }),
+        getManifest: () => ({ version: "3.7.0" }),
         getURL: (file) => `chrome-extension://extension-id/${file}`
       },
       storage: { session }
@@ -202,7 +202,7 @@ test("消息 Schema 限制账户与声明动作只能来自弹窗", () => {
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(root, "background/message-schema.js"), "utf8"), context);
   const schema = context.self.WinSpeedBallMessageSchema;
-  const sender = { id: "extension-id", url: "chrome-extension://extension-id/popup.html" };
+  const sender = { id: "extension-id", url: "chrome-extension://extension-id/popup/index.html" };
   const valid = schema.parse({
     version: 1,
     action: "registerUser",

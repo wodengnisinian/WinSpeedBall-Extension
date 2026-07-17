@@ -11,6 +11,13 @@
     browser: "popupLastPanelBrowser",
     pinned: "popupLastPanelPinned"
   };
+  var SHARED_PANEL_KEY = "popupLastPanel";
+
+  function normalizePanelId(value) {
+    var panelId = typeof value === "string" && value ? value : "videoPanel";
+    if (panelId === "assistantPanel") return "ocrPanel";
+    return panelId;
+  }
 
   function detectMode(search) {
     try {
@@ -23,7 +30,7 @@
   function normalizeState(value, mode) {
     value = value && typeof value === "object" && !Array.isArray(value) ? value : {};
     return {
-      lastPanelId: typeof value.lastPanelId === "string" && value.lastPanelId ? value.lastPanelId : "videoPanel",
+      lastPanelId: normalizePanelId(value.lastPanelId),
       chromeHidden: true,
       scriptWorkspaceActive: mode === MODE_PINNED && value.scriptWorkspaceActive === true,
       lastWorkspaceScript: value.lastWorkspaceScript && typeof value.lastWorkspaceScript === "object"
@@ -53,11 +60,12 @@
     }
 
     function loadState(callback) {
-      storage.get([stateKey, panelKey, "popupState", "lastWorkspaceScript"], function (data) {
+      storage.get([stateKey, panelKey, SHARED_PANEL_KEY, "popupState", "lastWorkspaceScript"], function (data) {
         data = data || {};
         var state = data[stateKey] || data.popupState || {};
         state = normalizeState(state, mode);
-        if (typeof data[panelKey] === "string" && data[panelKey]) state.lastPanelId = data[panelKey];
+        var savedPanel = data[SHARED_PANEL_KEY] || data[panelKey];
+        if (typeof savedPanel === "string" && savedPanel) state.lastPanelId = normalizePanelId(savedPanel);
         if (!state.lastWorkspaceScript && data.lastWorkspaceScript && typeof data.lastWorkspaceScript === "object") {
           state.lastWorkspaceScript = data.lastWorkspaceScript;
         }
@@ -70,6 +78,7 @@
       var payload = Object.assign({}, extra || {});
       payload[stateKey] = state;
       payload[panelKey] = state.lastPanelId;
+      payload[SHARED_PANEL_KEY] = state.lastPanelId;
       if (mode === MODE_PINNED) payload.popupState = state;
       storage.set(payload, callback);
     }
@@ -113,7 +122,9 @@
       mode: mode,
       stateKey: stateKey,
       panelKey: panelKey,
+      sharedPanelKey: SHARED_PANEL_KEY,
       isPinned: mode === MODE_PINNED,
+      normalizePanelId: normalizePanelId,
       applyMode: applyMode,
       loadState: loadState,
       saveState: saveState,
@@ -124,6 +135,7 @@
   global.WinSpeedBallPopupWindowMode = {
     create: create,
     detectMode: detectMode,
+    normalizePanelId: normalizePanelId,
     normalizeState: normalizeState
   };
 })(self);

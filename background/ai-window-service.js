@@ -9,18 +9,20 @@
       height: Math.max(1, Math.round(Number(options.bounds && options.bounds.height) || 180))
     });
     var replyWindowId = null;
-    var recoveredWindowId = null;
     var queue = Promise.resolve();
     var hydration = null;
     var resizeTimer = null;
     var pendingResize = null;
+    var WINDOW_GAP = 8;
+    var COMPACT_SOURCE_MAX_WIDTH = 480;
+    var COMPACT_SOURCE_MAX_HEIGHT = 600;
 
     function lastErrorMessage() {
       return chrome.runtime.lastError ? chrome.runtime.lastError.message : "";
     }
 
     function replyUrl() {
-      return chrome.runtime.getURL("ai_reply.html");
+      return chrome.runtime.getURL("popup/ai-reply.html");
     }
 
     function isReplyWindow(windowInfo) {
@@ -29,61 +31,91 @@
       }));
     }
 
-    function getWindow(windowId) {
+    function getWindow(windowId, trustedContext) {
       return new Promise(function (resolve) {
         if (!Number.isInteger(windowId) || windowId < 0) { resolve(null); return; }
         try {
           chrome.windows.get(windowId, { populate: true }, function (windowInfo) {
             var error = lastErrorMessage();
-            resolve(error || !isReplyWindow(windowInfo) ? null : windowInfo);
+            var valid = trustedContext === true
+              ? !!(windowInfo && windowInfo.type === "popup")
+              : isReplyWindow(windowInfo);
+            resolve(error || !valid ? null : windowInfo);
           });
         } catch (error) { resolve(null); }
       });
     }
 
-    function firstValidWindow(windowIds) {
-      return (windowIds || []).reduce(function (chain, windowId) {
-        return chain.then(function (found) { return found || getWindow(windowId); });
-      }, Promise.resolve(null));
+    function uniqueWindows(windows) {
+      var seen = {};
+      return (windows || []).filter(function (windowInfo) {
+        if (!windowInfo || !Number.isInteger(windowInfo.id) || seen[windowInfo.id]) return false;
+        seen[windowInfo.id] = true;
+        return true;
+      });
     }
 
     function findUsingContexts() {
-      if (!chrome.runtime || typeof chrome.runtime.getContexts !== "function") return Promise.resolve(null);
+      if (!chrome.runtime || typeof chrome.runtime.getContexts !== "function") return Promise.resolve([]);
       try {
         return Promise.resolve(chrome.runtime.getContexts({ documentUrls: [replyUrl()] })).then(function (contexts) {
           var ids = (contexts || []).map(function (context) { return context.windowId; }).filter(function (windowId, index, list) {
             return Number.isInteger(windowId) && windowId >= 0 && list.indexOf(windowId) === index;
           });
-          return firstValidWindow(ids);
-        }).catch(function () { return null; });
-      } catch (error) { return Promise.resolve(null); }
+          return Promise.all(ids.map(function (windowId) { return getWindow(windowId, true); })).then(function (windows) {
+            return windows.filter(Boolean);
+          });
+        }).catch(function () { return []; });
+      } catch (error) { return Promise.resolve([]); }
     }
 
     function findUsingWindowList() {
-      if (!chrome.windows || typeof chrome.windows.getAll !== "function") return Promise.resolve(null);
+      if (!chrome.windows || typeof chrome.windows.getAll !== "function") return Promise.resolve([]);
       return new Promise(function (resolve) {
         try {
           chrome.windows.getAll({ populate: true, windowTypes: ["popup"] }, function (windows) {
             var error = lastErrorMessage();
-            resolve(error ? null : (windows || []).find(isReplyWindow) || null);
+            resolve(error ? [] : (windows || []).filter(isReplyWindow));
           });
-        } catch (error) { resolve(null); }
+        } catch (error) { resolve([]); }
+      });
+    }
+
+    function closeReplyWindow(windowId) {
+      return new Promise(function (resolve) {
+        if (!chrome.windows || typeof chrome.windows.remove !== "function") { resolve(); return; }
+        try {
+          chrome.windows.remove(windowId, function () {
+            lastErrorMessage();
+            resolve();
+          });
+        } catch (error) { resolve(); }
       });
     }
 
     function findExistingWindow() {
-      return findUsingContexts().then(function (windowInfo) {
-        return windowInfo || findUsingWindowList();
+      return Promise.all([findUsingContexts(), findUsingWindowList()]).then(function (groups) {
+        var windows = uniqueWindows((groups[0] || []).concat(groups[1] || []));
+        var preferred = replyWindowId == null ? null : windows.find(function (windowInfo) {
+          return windowInfo.id === replyWindowId;
+        });
+        preferred = preferred || windows[0] || null;
+        var duplicates = windows.filter(function (windowInfo) {
+          return !preferred || windowInfo.id !== preferred.id;
+        });
+        return Promise.all(duplicates.map(function (windowInfo) {
+          return closeReplyWindow(windowInfo.id);
+        })).then(function () { return preferred; });
       });
     }
 
     function hydrate() {
-      if (replyWindowId != null) return Promise.resolve({ ok: true, active: true, windowId: replyWindowId });
       if (hydration) return hydration;
       hydration = findExistingWindow().then(function (windowInfo) {
         if (windowInfo) {
           replyWindowId = windowInfo.id;
-          recoveredWindowId = windowInfo.id;
+        } else {
+          replyWindowId = null;
         }
         return { ok: true, active: !!windowInfo, windowId: windowInfo ? windowInfo.id : null };
       }).catch(function () {
@@ -98,8 +130,11 @@
     function savePayload(request) {
       return new Promise(function (resolve, reject) {
         var payload = {};
+        var normalizer = global.WinSpeedBallTextNormalizer;
+        var content = String(request && request.content || "");
+        if (normalizer && typeof normalizer.normalize === "function") content = normalizer.normalize(content);
         payload[storageKey] = {
-          content: String(request && request.content || ""),
+          content: content,
           updatedAt: Date.now()
         };
         try {
@@ -114,6 +149,18 @@
 
     function clamp(value, min, max) {
       return Math.max(min, Math.min(max, value));
+    }
+
+    function positionNextToCompactWindow(windowInfo) {
+      var sourceLeft = Math.round(Number(windowInfo.left || 0));
+      var sourceTop = Math.round(Number(windowInfo.top || 0));
+      var sourceWidth = Math.max(1, Math.round(Number(windowInfo.width || 1)));
+      var sourceHeight = Math.max(1, Math.round(Number(windowInfo.height || 1)));
+      var placeOnLeft = sourceLeft >= bounds.width + WINDOW_GAP;
+      return {
+        left: placeOnLeft ? sourceLeft - bounds.width - WINDOW_GAP : sourceLeft + sourceWidth + WINDOW_GAP,
+        top: sourceTop + Math.max(0, Math.round((sourceHeight - bounds.height) / 2))
+      };
     }
 
     function resolvePosition(request) {
@@ -138,6 +185,13 @@
           if (error || !browserWindow) { resolve({ left: 40, top: 80 }); return; }
           if (browserWindow.id === replyWindowId) {
             resolve({ left: Math.round(Number(browserWindow.left || 40)), top: Math.round(Number(browserWindow.top || 80)) });
+            return;
+          }
+          var browserWidth = Number(browserWindow.width || 0);
+          var browserHeight = Number(browserWindow.height || 0);
+          if (browserWindow.type === "popup" && browserWidth > 0 && browserHeight > 0
+            && browserWidth <= COMPACT_SOURCE_MAX_WIDTH && browserHeight <= COMPACT_SOURCE_MAX_HEIGHT) {
+            resolve(positionNextToCompactWindow(browserWindow));
             return;
           }
           resolve({
@@ -176,7 +230,7 @@
       });
     }
 
-    function createOrReuse(position) {
+    function replaceWindow(position) {
       var windowBounds = {
         focused: true,
         left: position.left,
@@ -184,21 +238,13 @@
         width: bounds.width,
         height: bounds.height
       };
-      var knownId = replyWindowId;
-      var existing = knownId == null ? Promise.resolve(null) : getWindow(knownId);
-      return existing.then(function (windowInfo) {
-        if (windowInfo) {
-          var wasRecovered = recoveredWindowId === windowInfo.id;
-          recoveredWindowId = null;
-          return focusWindow(windowInfo, windowBounds, wasRecovered);
-        }
-        if (knownId != null && replyWindowId === knownId) replyWindowId = null;
-        return findExistingWindow().then(function (recoveredWindow) {
-          if (!recoveredWindow) return null;
-          return focusWindow(recoveredWindow, windowBounds, true);
-        });
-      }).then(function (result) {
-        if (result) return result;
+      var previousId = replyWindowId;
+      replyWindowId = null;
+      var closePrevious = previousId == null ? Promise.resolve() : closeReplyWindow(previousId);
+      return closePrevious.then(function () {
+        return previousId == null ? null : getWindow(previousId, true);
+      }).then(function (remainingWindow) {
+        if (remainingWindow) return focusWindow(remainingWindow, windowBounds, false);
         return createWindow(windowBounds);
       });
     }
@@ -207,7 +253,7 @@
       callback = typeof callback === "function" ? callback : function () {};
       var task = queue.catch(function () {}).then(hydrate).then(function () { return savePayload(request || {}); }).then(function () {
         return resolvePosition(request || {});
-      }).then(createOrReuse);
+      }).then(replaceWindow);
       queue = task;
       task.then(callback).catch(function (error) {
         callback({ ok: false, error: error && error.message || String(error || "Could not display AI reply.") });
@@ -217,7 +263,6 @@
 
     function handleRemoved(windowId) {
       if (windowId === replyWindowId) replyWindowId = null;
-      if (windowId === recoveredWindowId) recoveredWindowId = null;
     }
 
     function handleBoundsChanged(windowInfo) {

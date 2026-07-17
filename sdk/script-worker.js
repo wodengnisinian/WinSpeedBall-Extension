@@ -15,11 +15,20 @@
   var pendingRequests = new Map();
   var eventHandlers = new Map();
   var METHODS = Object.freeze({
-    video: Object.freeze(["getAll", "current", "getStatus", "setRate", "setVolume", "mute", "play", "pause"]),
+    video: Object.freeze(["all", "current", "status", "rate", "volume", "mute", "play", "pause", "getAll", "getStatus", "setRate", "setVolume"]),
     ocr: Object.freeze(["latest", "capture", "recognize"]),
-    ai: Object.freeze(["ask", "summary", "translate"]),
+    qa: Object.freeze(["latest", "ocr", "voice"]),
+    ai: Object.freeze(["latest", "history", "ask", "summary", "translate"]),
     page: Object.freeze(["info", "text", "title", "url"]),
+    book: Object.freeze(["status", "getStatus"]),
     storage: Object.freeze(["get", "set"])
+  });
+  var METHOD_ALIASES = Object.freeze({
+    "video.all": "video.getAll",
+    "video.status": "video.getStatus",
+    "video.rate": "video.setRate",
+    "video.volume": "video.setVolume",
+    "book.status": "book.getStatus"
   });
   var EVENTS = Object.freeze([
     "video.play", "video.pause", "video.finish", "ocr.complete", "ai.complete", "page.change"
@@ -106,7 +115,11 @@
     var group = {};
     names.forEach(function (name) {
       group[name] = function () {
-        return invoke(namespace + "." + name, Array.prototype.slice.call(arguments));
+        var publicMethod = namespace + "." + name;
+        var args = Array.prototype.slice.call(arguments);
+        if (publicMethod === "video.mute" && !args.length) args = [true];
+        if (publicMethod === "ai.history" && !args.length) args = [10];
+        return invoke(METHOD_ALIASES[publicMethod] || publicMethod, args);
       };
     });
     return Object.freeze(group);
@@ -142,11 +155,13 @@
 
   function createWsb() {
     return Object.freeze({
-      version: "0.1.0-beta",
+      version: "3.7.0-beta",
       video: createMethodGroup("video", METHODS.video),
       ocr: createMethodGroup("ocr", METHODS.ocr),
+      qa: createMethodGroup("qa", METHODS.qa),
       ai: createMethodGroup("ai", METHODS.ai),
       page: createMethodGroup("page", METHODS.page),
+      book: createMethodGroup("book", METHODS.book),
       event: createEventApi(),
       storage: createMethodGroup("storage", METHODS.storage)
     });

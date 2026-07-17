@@ -17,8 +17,22 @@
     return chrome.userScripts.getScripts().catch(function () { throw disabledError(); });
   }
 
+  function hashPart(value, seed) {
+    var hash = seed >>> 0;
+    var source = String(value || "");
+    for (var index = 0; index < source.length; index += 1) {
+      hash ^= source.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return ("00000000" + (hash >>> 0).toString(16)).slice(-8);
+  }
+
   function safePart(value) {
-    return String(value || "script").replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 48) || "script";
+    var source = String(value || "script");
+    var normalized = source.replace(/[^a-zA-Z0-9_-]/g, "-") || "script";
+    if (normalized === source && normalized.length <= 48) return normalized;
+    var suffix = hashPart(source, 2166136261) + hashPart(source, 2654435769);
+    return normalized.slice(0, 31) + "-" + suffix;
   }
 
   function registrationId(script) {
@@ -52,8 +66,9 @@
     if (declaredCapabilities(code).indexOf("video.read") < 0) return "";
     return [
       "var WSB=Object.freeze({",
-      "version:'0.1.0-beta',",
+      "version:'3.7.0-beta',",
       "video:Object.freeze({",
+      "status:function(){return chrome.runtime.sendMessage({channel:'WSB_USER_SCRIPT_BRIDGE',version:1,action:'GET_VIDEO_STATUS'});},",
       "getStatus:function(){return chrome.runtime.sendMessage({channel:'WSB_USER_SCRIPT_BRIDGE',version:1,action:'GET_VIDEO_STATUS'});}",
       "})",
       "});"

@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>AI 回复</title>
+  <style>
+    :root{--c-bg:#09111a;--c-panel:#101c28;--c-card:#142331;--c-card-hover:#182a3a;--c-border:#2a4052;--c-text:#dce8f1;--c-strong:#f0f6fb;--c-muted:#8ca0b3;--c-accent:#78c1ec;--c-accent-bg:#225f88;--c-accent-hover:#2b709d}
+    *{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden;color-scheme:dark}body{padding:9px 8px 8px;background:var(--c-bg);color:var(--c-text);font:12px/1.5 "Segoe UI","Microsoft YaHei",sans-serif}
+    .reply-card{position:relative;width:100%;height:100%;min-width:0;display:flex;flex-direction:column;padding:10px;border:1px solid var(--c-border);border-radius:10px;background:var(--c-panel);box-shadow:0 8px 24px rgba(2,8,14,.28)}.reply-tail{position:absolute;top:-8px;left:calc(50% - 7px);width:14px;height:14px;border-left:1px solid var(--c-border);border-top:1px solid var(--c-border);background:var(--c-panel);transform:rotate(45deg)}
+    .reply-head{display:flex;align-items:center;min-width:0;gap:8px;margin-bottom:8px}.reply-heading{flex:1;min-width:0}.reply-title{color:var(--c-accent);font-weight:700;font-size:14px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.reply-meta{margin-top:2px;color:var(--c-muted);font-size:10px;line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.close-btn{flex:0 0 28px;width:28px;height:28px;padding:0;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--c-muted);cursor:pointer;font-size:19px;line-height:1}.close-btn:hover{border-color:var(--c-border);background:var(--c-card-hover);color:var(--c-strong)}
+    .reply-content{flex:1;min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding:11px 12px;border:1px solid var(--c-border);border-radius:8px;background:var(--c-card);color:var(--c-strong);font-size:13px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;tab-size:2;user-select:text;scrollbar-width:thin}.reply-actions{display:flex;align-items:center;min-width:0;gap:8px;margin-top:8px}.copy-status{flex:1;min-width:0;color:var(--c-muted);font-size:10px;line-height:1.35;white-space:normal}.action-buttons{display:flex;align-items:center;flex:0 0 auto;gap:6px}.reply-shortcut{padding:2px 6px;border:1px solid var(--c-border);border-radius:999px;background:var(--c-card);color:var(--c-muted);font-size:9px;line-height:1.5}.copy-btn{flex:0 0 auto;min-width:76px;height:30px;padding:0 11px;border:1px solid #367da8;border-radius:7px;background:var(--c-accent-bg);color:var(--c-strong);cursor:pointer;font-size:11px;font-weight:700}.copy-btn:hover{background:var(--c-accent-hover)}.copy-btn:disabled{cursor:default;opacity:.5}
+    .close-btn:focus-visible,.copy-btn:focus-visible,.reply-content:focus-visible{outline:2px solid var(--c-accent);outline-offset:2px}::selection{background:#2e719b;color:#fff}::-webkit-scrollbar{width:7px}::-webkit-scrollbar-track{background:var(--c-card)}::-webkit-scrollbar-thumb{background:#3a566d;border:2px solid var(--c-card);border-radius:999px}
+  </style>
+</head>
+<body>
+  <main class="reply-card" role="dialog" aria-labelledby="replyTitle">
+    <div class="reply-tail"></div>
+    <div class="reply-head"><div class="reply-heading"><div class="reply-title" id="replyTitle">AI 回复</div><div class="reply-meta" id="replyMeta">正在读取回复</div></div><button class="close-btn" id="closeBtn" type="button" aria-label="关闭回复">&#215;</button></div>
+    <div class="reply-content" id="replyContent" tabindex="0" role="document" aria-label="AI 回复正文">正在读取回复...</div>
+    <div class="reply-actions"><div class="copy-status" id="copyStatus" role="status" aria-live="polite">可选择文字，或一键复制完整回复</div><div class="action-buttons"><div class="reply-shortcut" aria-label="复制快捷键 Alt 加 M">Alt+M</div><button class="copy-btn" id="copyBtn" type="button" disabled>复制回复</button></div></div>
+  </main>
+  <script src="ai-reply.js"></script>
+</body>
+</html>

@@ -8,9 +8,9 @@ const root = path.resolve(__dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
 
 test("主弹窗不再加载 OCR 引擎，识别统一交给后台离屏任务", () => {
-  const html = read("popup.html");
-  const popup = read("popup.js");
-  const background = read("background.js");
+  const html = read("popup/index.html");
+  const popup = read("popup/index.js");
+  const background = read("background/service-worker.js");
   assert.doesNotMatch(html, /vendor\/tesseract\/tesseract\.min\.js/);
   assert.doesNotMatch(html, /<script src="ocr\.js"/);
   assert.doesNotMatch(popup, /winSpeedBallOcr\.recognize/);
@@ -19,7 +19,7 @@ test("主弹窗不再加载 OCR 引擎，识别统一交给后台离屏任务", 
 });
 
 test("主弹窗和固定窗口使用更易读的固定尺寸", () => {
-  const html = read("popup.html");
+  const html = read("popup/index.html");
   const windowService = read("background/window-service.js");
   assert.match(html, /--popup-width:320px/);
   assert.match(html, /--popup-height:340px/);
@@ -40,7 +40,7 @@ test("OCR 重试消息只允许受信弹窗且不接受额外参数", () => {
   vm.runInContext(read("background/message-schema.js"), context);
   const schema = context.self.WinSpeedBallMessageSchema;
   const message = { version: 1, action: "retryManualOcr", source: "popup", requestId: "ocr-retry-1", payload: {} };
-  assert.equal(schema.parse(message, { id: extensionId, url: `chrome-extension://${extensionId}/popup.html` }).ok, true);
+  assert.equal(schema.parse(message, { id: extensionId, url: `chrome-extension://${extensionId}/popup/index.html` }).ok, true);
   assert.equal(schema.parse(message, { id: extensionId, url: `chrome-extension://${extensionId}/other.html` }).ok, false);
-  assert.equal(schema.parse({ ...message, payload: { force: true } }, { id: extensionId, url: `chrome-extension://${extensionId}/popup.html` }).ok, false);
+  assert.equal(schema.parse({ ...message, payload: { force: true } }, { id: extensionId, url: `chrome-extension://${extensionId}/popup/index.html` }).ok, false);
 });

@@ -54,6 +54,18 @@ test("可以新增、选择、保存和删除多个 SDK 草稿", async () => {
   assert.equal(fixture.store.getActive().id, second.id);
 });
 
+test("可以复制 SDK 草稿并自动生成副本名称", async () => {
+  const fixture = buildStore();
+  await fixture.store.load();
+  const source = await fixture.store.createDraft(validCode("Original"));
+  const duplicate = await fixture.store.duplicateDraft(source.id);
+  assert.notEqual(duplicate.id, source.id);
+  assert.equal(duplicate.name, "Original 副本");
+  assert.match(duplicate.code, /@name Original 副本/);
+  assert.equal(fixture.store.snapshot().drafts.length, 2);
+  assert.equal(fixture.store.getActive().id, duplicate.id);
+});
+
 test("拒绝旧权限脚本和能力冲突脚本", async () => {
   const fixture = buildStore();
   await fixture.store.load();
