@@ -97,6 +97,103 @@
 - [`PRIVACY.md`](PRIVACY.md)：本地数据、第三方服务与删除方式
 - [`docs/usage-declaration.md`](docs/usage-declaration.md)：允许用途、禁止用途与责任边界
 
+## Developer SDK 对外公开接口
+
+当前公开 SDK 版本为 `3.7.0-beta`。高级脚本通过冻结的 `WSB` 对象调用接口，所有方法均返回 Promise；脚本只能使用元数据中声明并由用户明确确认的能力。
+
+### 能力声明
+
+| 能力 | 允许访问的内容 |
+| --- | --- |
+| `video.read` | 视频列表、当前视频和完整播放状态 |
+| `video.control` | 倍速、音量、静音、播放和暂停 |
+| `ocr.read` | 最近一次 OCR 结果以及 OCR 预留能力 |
+| `qa.read` | 问题获取中的最新 OCR、网页语音和聚合问题 |
+| `ai.read` | 已保存在本地的最新 AI 回复和历史回复 |
+| `ai.request` | 向用户已配置的 AI 服务提问、总结和翻译 |
+| `page.read` | 当前授权页面的标题、URL、语言和正文 |
+| `book.read` | 当前学习通图书、页码、选项和封底检测状态 |
+| `storage` | 当前脚本独立的本地键值存储 |
+
+脚本头部示例：
+
+```javascript
+// ==UserScript==
+// @name 读取视频与最新问答
+// @version 1.0.0
+// @wsb-capability video.read
+// @wsb-capability qa.read
+// @wsb-capability ai.read
+// ==/UserScript==
+```
+
+能力发生变化后必须重新确认。`qa.read` 与 `ai.read` 是独立只读权限，不会因为脚本具有 `ai.request` 就自动开放本地问题或历史答案。
+
+### 公开接口清单
+
+| 分组 | 公开方法 | 所需能力 | 用途与状态 |
+| --- | --- | --- | --- |
+| Video | `WSB.video.all()` | `video.read` | 返回所有已发现媒体 |
+| Video | `WSB.video.current()` | `video.read` | 返回当前优先媒体，没有时为 `null` |
+| Video | `WSB.video.status()` | `video.read` | 返回当前聚合视频状态 |
+| Video | `WSB.video.rate(rate)` | `video.control` | 设置 `0.25` 至 `16` 倍速 |
+| Video | `WSB.video.volume(volume)` | `video.control` | 设置 `0` 至 `1` 音量 |
+| Video | `WSB.video.mute(muted = true)` | `video.control` | 静音或取消静音 |
+| Video | `WSB.video.play()` | `video.control` | 播放当前优先媒体 |
+| Video | `WSB.video.pause()` | `video.control` | 暂停当前优先媒体 |
+| OCR | `WSB.ocr.latest()` | `ocr.read` | 返回最近一次 OCR 文字、时间和置信度 |
+| OCR | `WSB.ocr.capture()` | `ocr.read` | 预留接口，当前返回 `SDK_DEPENDENCY_NOT_READY` |
+| OCR | `WSB.ocr.recognize(input)` | `ocr.read` | 预留接口，当前返回 `SDK_DEPENDENCY_NOT_READY` |
+| Question | `WSB.qa.latest()` | `qa.read` | 返回 OCR 与网页语音中时间最新的问题 |
+| Question | `WSB.qa.ocr()` | `qa.read` | 返回最新 OCR 问题状态 |
+| Question | `WSB.qa.voice()` | `qa.read` | 返回最新网页语音问题状态 |
+| AI | `WSB.ai.latest()` | `ai.read` | 返回最新 AI 问答记录，没有时为 `null` |
+| AI | `WSB.ai.history(limit = 10)` | `ai.read` | 返回 `1` 至 `20` 条历史问答 |
+| AI | `WSB.ai.ask(prompt)` | `ai.request` | 使用当前 Provider 提问 |
+| AI | `WSB.ai.summary(sourceText)` | `ai.request` | 总结指定文字 |
+| AI | `WSB.ai.translate(sourceText, targetLanguage)` | `ai.request` | 翻译指定文字 |
+| Page | `WSB.page.info()` | `page.read` | 返回页面标题、URL 和语言 |
+| Page | `WSB.page.text()` | `page.read` | 返回页面正文 |
+| Page | `WSB.page.title()` | `page.read` | 返回页面标题 |
+| Page | `WSB.page.url()` | `page.read` | 返回页面 URL |
+| Book | `WSB.book.status()` | `book.read` | 返回学习通图书、当前选项和封底检测状态 |
+| Event | `WSB.event.on(eventName, callback)` | 按事件决定 | 预留事件契约，当前实时事件传输尚未接通 |
+| Storage | `WSB.storage.get(key)` | `storage` | 读取当前脚本的隔离存储值 |
+| Storage | `WSB.storage.set(key, value)` | `storage` | 保存隔离存储值并返回已用字节数 |
+
+全部推荐公开方法名均不超过 13 个字符。旧名称 `video.getAll/getStatus/setRate/setVolume` 和 `book.getStatus` 继续映射到相同实现，建议新脚本使用表中的短名称。
+
+### 常用返回字段
+
+`WSB.video.status()` 包含界面视频状态区对应字段：
+
+| 界面内容 | 返回字段 |
+| --- | --- |
+| 倍速 | `rate` |
+| 播放状态 | `playbackState`、`playing`、`paused` |
+| 音量 | `volume`、`muted` |
+| 媒体数量 | `mediaCount` |
+| 总时长 | `duration` |
+| 已播放 | `currentTime` |
+| 自动播放 | `autoplay` |
+| 倍速锁 | `rateLocked` |
+
+`WSB.qa.latest()` 返回 `source`、`text`、`status`、`progress`、`time`、`durationMs` 和 `error`。`WSB.ai.latest()` 与 `WSB.ai.history()` 返回 `provider`、`model`、`mode`、`question`、`answer`、`time`、`source` 和 `truncated`，不会返回 API Key、Base URL、OCR 原图或语音原始录音。
+
+### 调用示例
+
+```javascript
+const video = await WSB.video.status();
+const question = await WSB.qa.latest();
+const aiRecord = await WSB.ai.latest();
+
+console.log("媒体数量：", video.mediaCount);
+console.log("问题：", question.text);
+console.log("AI 答案：", aiRecord ? aiRecord.answer : "暂无答案");
+```
+
+完整参数、返回模型、错误码和脚本示例见 [`docs/user-guide-and-script-api.md`](docs/user-guide-and-script-api.md)。
+
 ## 在 Microsoft Edge 中安装
 
 1. 打开 `edge://extensions/`。

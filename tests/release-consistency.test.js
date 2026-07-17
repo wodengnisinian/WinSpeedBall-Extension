@@ -177,6 +177,23 @@ test("完整使用说明覆盖普通脚本、SDK 能力和全部公开方法", (
   assert.match(read("README.md"), /docs\/user-guide-and-script-api\.md/);
 });
 
+test("README 完整列出当前 SDK 能力和短公开接口", () => {
+  const context = { self: {}, Object, Array, String, Number, JSON };
+  vm.createContext(context);
+  vm.runInContext(read("sdk/contracts.js"), context);
+  const contracts = context.self.WinSpeedBallSdkContracts;
+  const readme = read("README.md");
+
+  Array.from(contracts.CAPABILITIES).forEach((capability) => {
+    assert.ok(readme.includes(`\`${capability}\``), `README 缺少能力：${capability}`);
+  });
+  Object.keys(contracts.PUBLIC_METHODS).forEach((method) => {
+    assert.ok(readme.includes(`WSB.${method}(`), `README 缺少公开方法：${method}`);
+  });
+  assert.equal(Object.keys(contracts.PUBLIC_METHODS).length, 27);
+  assert.match(readme, /全部推荐公开方法名均不超过 13 个字符/);
+});
+
 test("SDK sandbox permits only Blob-backed workers", () => {
   const manifest = JSON.parse(read("manifest.json"));
   assert.ok(manifest.sandbox.pages.includes("sdk/script-runner.html"));
