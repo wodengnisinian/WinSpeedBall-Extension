@@ -12,10 +12,12 @@
     pinned: "popupLastPanelPinned"
   };
   var SHARED_PANEL_KEY = "popupLastPanel";
+  var SHARED_VIEW_KEY = "popupLastView";
 
   function normalizePanelId(value) {
     var panelId = typeof value === "string" && value ? value : "videoPanel";
     if (panelId === "assistantPanel") return "ocrPanel";
+    if (panelId === "aiTeachingPanel") return "aiPanel";
     return panelId;
   }
 
@@ -27,10 +29,28 @@
     }
   }
 
+  function normalizeScrollPositions(value) {
+    value = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    var result = {};
+    Object.keys(value).forEach(function (key) {
+      if (!/^[A-Za-z][A-Za-z0-9]{0,39}$/.test(key)) return;
+      var position = Number(value[key]);
+      if (!Number.isFinite(position)) return;
+      result[key] = Math.max(0, Math.min(1000000, Math.round(position)));
+    });
+    return result;
+  }
+
   function normalizeState(value, mode) {
     value = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    var legacyTeachingView = value.lastPanelId === "aiTeachingPanel";
     return {
       lastPanelId: normalizePanelId(value.lastPanelId),
+      viewMode: value.viewMode === "aiTeaching" || legacyTeachingView ? "aiTeaching" : "main",
+      questionView: value.questionView === "voice" ? "voice" : "capture",
+      bookView: ["book", "image", "chaoxing"].indexOf(value.bookView) >= 0 ? value.bookView : "book",
+      logView: value.logView === "updates" ? "updates" : "runtime",
+      scrollPositions: normalizeScrollPositions(value.scrollPositions),
       chromeHidden: true,
       scriptWorkspaceActive: mode === MODE_PINNED && value.scriptWorkspaceActive === true,
       lastWorkspaceScript: value.lastWorkspaceScript && typeof value.lastWorkspaceScript === "object"
@@ -60,12 +80,26 @@
     }
 
     function loadState(callback) {
-      storage.get([stateKey, panelKey, SHARED_PANEL_KEY, "popupState", "lastWorkspaceScript"], function (data) {
+      storage.get([stateKey, panelKey, SHARED_PANEL_KEY, SHARED_VIEW_KEY, "popupState", "lastWorkspaceScript", "popupLastQuestionView"], function (data) {
         data = data || {};
-        var state = data[stateKey] || data.popupState || {};
-        state = normalizeState(state, mode);
-        var savedPanel = data[SHARED_PANEL_KEY] || data[panelKey];
-        if (typeof savedPanel === "string" && savedPanel) state.lastPanelId = normalizePanelId(savedPanel);
+        var rawState = data[stateKey] || data.popupState || {};
+        var state = normalizeState(rawState, mode);
+        var hasSharedView = data[SHARED_VIEW_KEY] && typeof data[SHARED_VIEW_KEY] === "object";
+        if (hasSharedView) {
+          var sharedView = normalizeState(data[SHARED_VIEW_KEY], mode);
+          state.lastPanelId = sharedView.lastPanelId;
+          state.viewMode = sharedView.viewMode;
+          state.questionView = sharedView.questionView;
+          state.bookView = sharedView.bookView;
+          state.logView = sharedView.logView;
+          state.scrollPositions = sharedView.scrollPositions;
+        } else {
+          var savedPanel = data[SHARED_PANEL_KEY] || data[panelKey];
+          if (typeof savedPanel === "string" && savedPanel) state.lastPanelId = normalizePanelId(savedPanel);
+        }
+        if (!hasSharedView && !Object.prototype.hasOwnProperty.call(rawState, "questionView") && typeof data.popupLastQuestionView === "string") {
+          state.questionView = data.popupLastQuestionView === "voice" ? "voice" : "capture";
+        }
         if (!state.lastWorkspaceScript && data.lastWorkspaceScript && typeof data.lastWorkspaceScript === "object") {
           state.lastWorkspaceScript = data.lastWorkspaceScript;
         }
@@ -79,6 +113,14 @@
       payload[stateKey] = state;
       payload[panelKey] = state.lastPanelId;
       payload[SHARED_PANEL_KEY] = state.lastPanelId;
+      payload[SHARED_VIEW_KEY] = {
+        lastPanelId: state.lastPanelId,
+        viewMode: state.viewMode,
+        questionView: state.questionView,
+        bookView: state.bookView,
+        logView: state.logView,
+        scrollPositions: state.scrollPositions
+      };
       if (mode === MODE_PINNED) payload.popupState = state;
       storage.set(payload, callback);
     }
@@ -123,6 +165,7 @@
       stateKey: stateKey,
       panelKey: panelKey,
       sharedPanelKey: SHARED_PANEL_KEY,
+      sharedViewKey: SHARED_VIEW_KEY,
       isPinned: mode === MODE_PINNED,
       normalizePanelId: normalizePanelId,
       applyMode: applyMode,
@@ -136,6 +179,7 @@
     create: create,
     detectMode: detectMode,
     normalizePanelId: normalizePanelId,
-    normalizeState: normalizeState
+    normalizeState: normalizeState,
+    normalizeScrollPositions: normalizeScrollPositions
   };
 })(self);

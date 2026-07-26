@@ -8,6 +8,9 @@
   var meta = document.getElementById("replyMeta");
   var copyButton = document.getElementById("copyBtn");
   var statusTimer = null;
+  var metaBaseText = "";
+  var latestTruncated = false;
+  var replyScrollSurface = null;
 
   function countCharacters(text) {
     return Array.from(String(text || "")).length;
@@ -21,7 +24,13 @@
   }
 
   function defaultStatus() {
+    if (latestText && latestTruncated) return "回复达到模型输出上限，内容可能不完整";
     return latestText ? "可选择文字，或一键复制完整回复" : "暂无回复";
+  }
+
+  function updateReplyMeta(scrollState) {
+    var suffix = scrollState && scrollState.overflowing ? " · 阅读 " + scrollState.percent + "%" : "";
+    meta.textContent = (metaBaseText || "等待有效回复") + suffix;
   }
 
   function showTemporaryStatus(message) {
@@ -33,21 +42,36 @@
     }, 1800);
   }
 
+  function renderReplyContent(value) {
+    var renderer = self.WSBMathRenderer;
+    if (!renderer) {
+      content.textContent = value;
+      return Promise.resolve({ ok: true, formulas: false, fallback: true });
+    }
+    return renderer.render(content, value);
+  }
+
   function render(payload) {
     if (statusTimer) {
       clearTimeout(statusTimer);
       statusTimer = null;
     }
     latestText = String(payload && payload.content || "").trim();
-    content.textContent = latestText || "没有可显示的 AI 回复。";
+    latestTruncated = !!(payload && payload.truncated);
+    var rendering = renderReplyContent(latestText || "没有可显示的 AI 回复。");
     content.scrollTop = 0;
     copyButton.disabled = !latestText;
     document.body.dataset.hasReply = latestText ? "true" : "false";
-    meta.textContent = latestText
-      ? formatUpdatedAt(payload && payload.updatedAt) + " · " + countCharacters(latestText) + " 字"
+    metaBaseText = latestText
+      ? formatUpdatedAt(payload && payload.updatedAt) + " · " + countCharacters(latestText) + " 字" + (latestTruncated ? " · 可能不完整" : "")
       : "等待有效回复";
+    updateReplyMeta(replyScrollSurface ? replyScrollSurface.state() : null);
     status.textContent = defaultStatus();
     document.title = latestText ? "AI 回复 · " + countCharacters(latestText) + " 字" : "AI 回复";
+    Promise.resolve(rendering).then(function () {
+      if (replyScrollSurface) requestAnimationFrame(function () { replyScrollSurface.update(); });
+    });
+    return rendering;
   }
 
   function load() {
@@ -111,6 +135,16 @@
     } catch (error) {
       fallbackClose();
     }
+  }
+
+  if (self.WinSpeedBallScrollSurface) {
+    replyScrollSurface = self.WinSpeedBallScrollSurface.create({
+      element: content,
+      progress: document.getElementById("replyScrollProgress"),
+      topButton: document.getElementById("replyScrollTopBtn"),
+      observeMutations: true,
+      onUpdate: updateReplyMeta
+    });
   }
 
   copyButton.addEventListener("click", copyReply);

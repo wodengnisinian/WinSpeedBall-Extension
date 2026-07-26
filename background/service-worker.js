@@ -16,6 +16,7 @@ importScripts("window-service.js");
 importScripts("ai-window-service.js");
 importScripts("ai-providers.js");
 importScripts("../vendor/opencc/opencc-full-1.4.1.js");
+importScripts("../shared/structured-text-normalizer.js");
 importScripts("../voice/text-filter.js");
 importScripts("ai-service.js");
 importScripts("ocr-service.js");
@@ -41,6 +42,7 @@ importScripts("user-script-bridge.js");
   var AUTO_SCRIPT_TRIGGER_ID = "winspeedball-auto-script-trigger";
   var SDK_SESSIONS_KEY = "sdkRuntimeSessions";
   var SDK_CONTEXT_INTENTS_KEY = "sdkContextIntents";
+  var SDK_LIFECYCLE_MAINTENANCE_ALARM = "sdk-lifecycle-maintenance";
   var CAPTURE_AUTH_KEY = "pendingCaptureAuthorization";
   var AI_REPLY_KEY = "aiReplyWindowPayload";
   var AI_REPLY_BOUNDS = { width: 320, height: 240 };
@@ -51,10 +53,14 @@ importScripts("user-script-bridge.js");
   var BOOK_ALARM = "book-panel-auto-next";
   var BOOK_BACK_COVER_ALARM = "book-panel-chaoxing-back-cover-check";
   var CHAOXING_BACK_COVER_CHECK_DELAYS_SECONDS = [400, 300, 250, 150, 50];
-  var bookState = { running: false, interval: MIN_ALARM_INTERVAL_SECONDS, tabId: null, originPattern: "", mode: "book", backCoverCheckIndex: 0, backCoverCheckDueAt: 0, backCoverPageJumpLabel: "", backCoverReached: false };
+  var bookState = { running: false, interval: MIN_ALARM_INTERVAL_SECONDS, tabId: null, originPattern: "", mode: "book", ownerType: "", ownerOrigin: "", ownerScriptId: "", ownerSessionId: "", backCoverCheckIndex: 0, backCoverCheckDueAt: 0, backCoverPageJumpLabel: "", backCoverReached: false };
   var bookFastTimer = null;
   var bookFastTurnInFlight = false;
   var bookBackCoverCheckInFlight = false;
+  var sdkBookMutationQueue = Promise.resolve();
+  var sdkBookPendingOwners = Object.create(null);
+  var sdkBookCancelledOwners = Object.create(null);
+  var bookStateGeneration = 0;
   var lastBookDetection = { book: null, image: null, chaoxing: null };
   var storageGet = self.WinSpeedBallStorageService.get;
   var storageSet = self.WinSpeedBallStorageService.set;
@@ -128,10 +134,16 @@ importScripts("user-script-bridge.js");
     featureGate: featureGate,
     developerModeService: developerModeService,
     sdkStorageService: sdkStorageService,
-    consumeContext: function (nonce, capabilities) { return sdkContextService.consume(nonce, capabilities); },
+    consumeContext: function (nonce, capabilities, bookMode) { return sdkContextService.consume(nonce, capabilities, bookMode); },
     validateContext: validateSdkContext,
-    controlTab: function (tabId, command, callback) { videoService.controlTab(tabId, command, callback); },
-    getBookStatus: readSdkBookStatus,
+    controlTab: function (tabId, command, callback, boundContext) {
+      videoService.controlTab(tabId, command, callback, boundContext);
+    },
+    getBookStatus: function (tabId, mode, callback, boundContext) {
+      readSdkBookStatusBound(tabId, mode, boundContext, callback);
+    },
+    controlBook: controlSdkBook,
+    releaseBookResources: releaseSdkBookResources,
     callAi: callAi,
     getLatestOcr: getManualCapture,
     getVoiceState: function (callback) {
@@ -383,14 +395,20 @@ importScripts("user-script-bridge.js");
   }
 
   function readSdkSessions() {
-    return new Promise(function (resolve) {
+    return new Promise(function (resolve, reject) {
       try {
         chrome.storage.session.get([SDK_SESSIONS_KEY], function (data) {
           var error = lastErrorMessage();
-          var stored = !error && data && data[SDK_SESSIONS_KEY];
+          if (error) {
+            reject({ ok: false, code: "SDK_SESSION_STORAGE_FAILED", error: error });
+            return;
+          }
+          var stored = data && data[SDK_SESSIONS_KEY];
           resolve(stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {});
         });
-      } catch (error) { resolve({}); }
+      } catch (error) {
+        reject({ ok: false, code: "SDK_SESSION_STORAGE_FAILED", error: error.message || String(error) });
+      }
     });
   }
 
@@ -442,7 +460,7 @@ importScripts("user-script-bridge.js");
   function resolveSdkContext(capabilities) {
     capabilities = Array.isArray(capabilities) ? capabilities : [];
     var requiresTab = capabilities.some(function (capability) {
-      return capability === "video.read" || capability === "video.control" || capability === "page.read" || capability === "book.read" || capability === "ocr.read";
+      return capability === "video.read" || capability === "video.control" || capability === "page.read" || capability === "book.read" || capability === "book.control" || capability === "ocr.read";
     });
     return new Promise(function (resolve) {
       queryScriptTargetTab(function (tab, error) {
@@ -473,7 +491,7 @@ importScripts("user-script-bridge.js");
           var error = lastErrorMessage();
           var origin = tab && sdkOrigin(tab.url);
           if (error || !tab || origin !== session.origin) {
-            resolve({ ok: false, code: "SDK_CONTEXT_CLOSED", error: error || "The authorized page navigated to another origin or closed." });
+            resolve({ ok: false, code: "SDK_CONTEXT_CHANGED", error: error || "The authorized page navigated to another origin or closed." });
             return;
           }
           var pattern = originPatternFromUrl(tab.url || "");
@@ -881,29 +899,220 @@ importScripts("user-script-bridge.js");
     else callback({ ok: false, error: "Unknown douyin command.", running: douyinState.running, interval: douyinState.interval });
   }
 
-  function callMainWorldBookCore(target, command, callback) {
-    chrome.scripting.executeScript({
-      target: target,
-      world: "MAIN",
-      func: function (command) {
-        if (window.WinSpeedBallBookCoreV7 && typeof window.WinSpeedBallBookCoreV7.handleCommand === "function") {
-          return window.WinSpeedBallBookCoreV7.handleCommand(command);
+  function sdkContextChanged(error) {
+    return {
+      ok: false,
+      code: "SDK_CONTEXT_CHANGED",
+      error: String(error || "The authorized page changed before the SDK operation could run.")
+    };
+  }
+
+  function validateSdkBoundPage(target, boundContext, callback) {
+    if (!boundContext) {
+      callback(null);
+      return;
+    }
+    var tabId = Number(target && target.tabId);
+    var expectedOrigin = String(boundContext.origin || "");
+    var expectedPattern = String(boundContext.originPattern || "");
+    if (!Number.isInteger(tabId) || !expectedOrigin || !expectedPattern) {
+      callback(sdkContextChanged("The SDK page binding is incomplete."));
+      return;
+    }
+    try {
+      chrome.tabs.get(tabId, function (tab) {
+        var tabError = lastErrorMessage();
+        var actualOrigin = tab && sdkOrigin(tab.url || "");
+        var actualPattern = tab && originPatternFromUrl(tab.url || "");
+        callback(tabError || !tab || actualOrigin !== expectedOrigin || actualPattern !== expectedPattern
+          ? sdkContextChanged(tabError || "The authorized page navigated to another origin or closed.")
+          : null);
+      });
+    } catch (error) {
+      callback(sdkContextChanged(error && error.message || String(error)));
+    }
+  }
+
+  function bindSdkBookTarget(target, boundContext, callback) {
+    if (!boundContext) {
+      callback(target, null);
+      return;
+    }
+    if (!chrome.webNavigation || typeof chrome.webNavigation.getAllFrames !== "function") {
+      callback(null, sdkContextChanged("Browser document binding is unavailable."));
+      return;
+    }
+    validateSdkBoundPage(target, boundContext, function (contextFailure) {
+      if (contextFailure) {
+        callback(null, contextFailure);
+        return;
+      }
+      var tabId = Number(target && target.tabId);
+      try {
+        chrome.webNavigation.getAllFrames({ tabId: tabId }, function (frames) {
+          var frameError = lastErrorMessage();
+          var list = Array.isArray(frames) ? frames : [];
+          var topFrame = list.find(function (frame) { return frame && frame.frameId === 0; });
+          var topOrigin = topFrame && sdkOrigin(topFrame.url || "");
+          var topPattern = topFrame && originPatternFromUrl(topFrame.url || "");
+          if (frameError || !topFrame
+              || topOrigin !== String(boundContext.origin || "")
+              || topPattern !== String(boundContext.originPattern || "")) {
+            callback(null, sdkContextChanged(frameError || "The authorized document changed before the SDK operation could run."));
+            return;
+          }
+
+          var requestedFrameIds = Array.isArray(target && target.frameIds) ? target.frameIds.map(Number) : null;
+          var selected = target && target.allFrames === true
+            ? list.slice()
+            : (requestedFrameIds
+              ? requestedFrameIds.map(function (frameId) {
+                return list.find(function (frame) { return frame && frame.frameId === frameId; }) || null;
+              })
+              : [topFrame]);
+          if (!selected.length || selected.some(function (frame) {
+            return !frame || typeof frame.documentId !== "string" || !frame.documentId;
+          })) {
+            callback(null, sdkContextChanged("The authorized document could not be bound safely."));
+            return;
+          }
+          var documentIds = selected.map(function (frame) { return frame.documentId; }).filter(function (documentId, index, values) {
+            return values.indexOf(documentId) === index;
+          });
+          if (!documentIds.length) {
+            callback(null, sdkContextChanged("The authorized document could not be bound safely."));
+            return;
+          }
+          callback({ tabId: tabId, documentIds: documentIds }, null);
+        });
+      } catch (error) {
+        callback(null, sdkContextChanged(error && error.message || String(error)));
+      }
+    });
+  }
+
+  function callMainWorldBookCore(target, command, callback, boundContext) {
+    bindSdkBookTarget(target, boundContext, function (boundTarget, contextFailure) {
+      if (contextFailure) {
+        callback([], contextFailure);
+        return;
+      }
+      chrome.scripting.executeScript({
+        target: boundTarget,
+        world: "MAIN",
+        func: function (command) {
+          if (window.WinSpeedBallBookCoreV7 && typeof window.WinSpeedBallBookCoreV7.handleCommand === "function") {
+            return window.WinSpeedBallBookCoreV7.handleCommand(command);
+          }
+          return { ok: false, detected: false, error: "main book core required", frameUrl: location.href };
+        },
+        args: [command]
+      }, function (results) {
+        var executeError = lastErrorMessage();
+        if (!boundContext) {
+          callback(results, null);
+          return;
         }
-        return { ok: false, detected: false, error: "main book core required", frameUrl: location.href };
-      },
-      args: [command]
-    }, callback);
+        if (executeError) {
+          validateSdkBoundPage(target, boundContext, function (postContextFailure) {
+            callback([], postContextFailure || { ok: false, error: executeError });
+          });
+          return;
+        }
+        validateSdkBoundPage(target, boundContext, function (postContextFailure) {
+          callback(postContextFailure ? [] : results, postContextFailure);
+        });
+      });
+    });
   }
 
-  function injectMainWorldBookCore(target, callback) {
-    chrome.scripting.executeScript({
-      target: target,
-      world: "MAIN",
-      files: ["content/book-core-main.js"]
-    }, callback);
+  function scheduleSdkLifecycleMaintenance(reason, result) {
+    try {
+      appendBackgroundLog("SDK", "长期会话生命周期清理失败，已安排重试", {
+        触发原因: String(reason || "unknown"),
+        错误代码: result && result.code || "SDK_SESSION_CLOSE_FAILED",
+        原因: result && result.error || "unknown"
+      }, "warn");
+    } catch (error) {}
+    try {
+      chrome.alarms.create(SDK_LIFECYCLE_MAINTENANCE_ALARM, { delayInMinutes: 1 });
+    } catch (error) {}
+    return result;
   }
 
-  function runBookTurn(direction, tabId, originPattern, mode, callback) {
+  function inspectSdkLifecycleCleanup(reason, operation) {
+    return Promise.resolve(operation).then(function (result) {
+      return result && result.ok
+        ? result
+        : scheduleSdkLifecycleMaintenance(reason, result || {
+          ok: false,
+          code: "SDK_SESSION_CLOSE_FAILED",
+          error: "SDK lifecycle cleanup returned no result."
+        });
+    }, function (error) {
+      return scheduleSdkLifecycleMaintenance(reason, {
+        ok: false,
+        code: "SDK_SESSION_CLOSE_FAILED",
+        error: error && error.message || String(error)
+      });
+    });
+  }
+
+  function releaseSdkTabSessions(tabId, preserveOrigin) {
+    try {
+      return inspectSdkLifecycleCleanup("tab:" + tabId, sdkService.closeSessionsForTab(tabId, preserveOrigin));
+    } catch (error) {
+      return inspectSdkLifecycleCleanup("tab:" + tabId, Promise.resolve({
+          ok: false,
+          code: "SDK_TAB_SESSION_CLOSE_FAILED",
+          error: error && error.message || String(error),
+          tabId: tabId
+      }));
+    }
+  }
+
+  function releaseSdkOriginSessions(originPatterns) {
+    try {
+      return inspectSdkLifecycleCleanup("permissions", sdkService.closeSessionsForOrigins(originPatterns));
+    } catch (error) {
+      return inspectSdkLifecycleCleanup("permissions", Promise.resolve({
+          ok: false,
+          code: "SDK_ORIGIN_SESSION_CLOSE_FAILED",
+          error: error && error.message || String(error)
+      }));
+    }
+  }
+
+  function injectMainWorldBookCore(target, callback, boundContext) {
+    bindSdkBookTarget(target, boundContext, function (boundTarget, contextFailure) {
+      if (contextFailure) {
+        callback([], contextFailure);
+        return;
+      }
+      chrome.scripting.executeScript({
+        target: boundTarget,
+        world: "MAIN",
+        files: ["content/book-core-main.js"]
+      }, function (results) {
+        var executeError = lastErrorMessage();
+        if (!boundContext) {
+          callback(results, null);
+          return;
+        }
+        if (executeError) {
+          validateSdkBoundPage(target, boundContext, function (postContextFailure) {
+            callback([], postContextFailure || { ok: false, error: executeError });
+          });
+          return;
+        }
+        validateSdkBoundPage(target, boundContext, function (postContextFailure) {
+          callback(postContextFailure ? [] : results, postContextFailure);
+        });
+      });
+    });
+  }
+
+  function runBookTurn(direction, tabId, originPattern, mode, callback, continueCheck, boundContext) {
     mode = normalizeBookMode(mode);
     function execute(tab) {
       if (!tab || tab.id == null || isInternalUrl(tab.url || "")) {
@@ -940,7 +1149,7 @@ importScripts("user-script-bridge.js");
             mode: mode,
             error: mode === "image"
               ? "\u672a\u68c0\u6d4b\u5230\u53ef\u81ea\u52a8\u6eda\u52a8\u7684\u56fe\u7247\u5e8f\u5217\u3002\u8bf7\u5148\u6253\u5f00\u56fe\u7247\u5f62\u5f0f\u7684\u56fe\u4e66\u3002"
-              : (mode === "chaoxing" ? "CHAOXING_PDG_READER_NOT_FOUND" : "\u672a\u68c0\u6d4b\u5230\u53ef\u63a7\u5236\u7684\u56fe\u4e66\u9605\u8bfb\u5668\u3002\u8bf7\u5148\u5728\u5b66\u4e60\u901a\u7ae0\u8282\u4e2d\u6253\u5f00\u56fe\u4e66\u5185\u5bb9\u3002")
+              : (mode === "chaoxing" ? "CHAOXING_PDG_READER_NOT_FOUND" : "\u672a\u68c0\u6d4b\u5230\u53ef\u63a7\u5236\u7684\u7f51\u9875\u56fe\u4e66\u9605\u8bfb\u5668\u3002\u8bf7\u5148\u6253\u5f00\u56fe\u4e66\u5185\u5bb9\u3002")
           });
           return;
         }
@@ -955,7 +1164,15 @@ importScripts("user-script-bridge.js");
           callback(detection);
           return;
         }
-        callMainWorldBookCore({ tabId: tab.id, frameIds: [selected.frameId] }, { type: direction, mode: mode }, function (turnResults) {
+        if (typeof continueCheck === "function" && !continueCheck()) {
+          callback({ ok: false, code: "BOOK_TASK_CANCELLED", error: "Book task changed before the page turn was applied." });
+          return;
+        }
+        callMainWorldBookCore({ tabId: tab.id, frameIds: [selected.frameId] }, { type: direction, mode: mode }, function (turnResults, turnContextFailure) {
+          if (turnContextFailure) {
+            callback(turnContextFailure);
+            return;
+          }
           var turnError = lastErrorMessage();
           if (turnError) {
             callback({ ok: false, detected: true, frameId: selected.frameId, frameCount: detection.frameCount, error: turnError });
@@ -981,11 +1198,15 @@ importScripts("user-script-bridge.js");
           });
           lastBookDetection[mode] = response;
           callback(response);
-        });
+        }, boundContext);
       }
 
       function detectWithMainCore() {
-        callMainWorldBookCore({ tabId: tab.id, allFrames: true }, { type: "DETECT", mode: mode }, function (results) {
+        callMainWorldBookCore({ tabId: tab.id, allFrames: true }, { type: "DETECT", mode: mode }, function (results, detectionContextFailure) {
+          if (detectionContextFailure) {
+            callback(detectionContextFailure);
+            return;
+          }
           var detectionError = lastErrorMessage();
           if (detectionError) {
             callback({ ok: false, error: detectionError });
@@ -998,15 +1219,25 @@ importScripts("user-script-bridge.js");
             finishDetection(results);
             return;
           }
-          injectMainWorldBookCore({ tabId: tab.id, allFrames: true }, function () {
+          injectMainWorldBookCore({ tabId: tab.id, allFrames: true }, function (injectResults, injectContextFailure) {
+            if (injectContextFailure) {
+              callback(injectContextFailure);
+              return;
+            }
             var injectError = lastErrorMessage();
             if (injectError) {
               callback({ ok: false, error: injectError });
               return;
             }
-            callMainWorldBookCore({ tabId: tab.id, allFrames: true }, { type: "DETECT", mode: mode }, finishDetection);
-          });
-        });
+            callMainWorldBookCore({ tabId: tab.id, allFrames: true }, { type: "DETECT", mode: mode }, function (retryResults, retryContextFailure) {
+              if (retryContextFailure) {
+                callback(retryContextFailure);
+                return;
+              }
+              finishDetection(retryResults);
+            }, boundContext);
+          }, boundContext);
+        }, boundContext);
       }
 
       detectWithMainCore();
@@ -1039,6 +1270,65 @@ importScripts("user-script-bridge.js");
     });
   }
 
+  function clearBookRunningState() {
+    bookStateGeneration += 1;
+    bookState.running = false;
+    bookState.tabId = null;
+    bookState.originPattern = "";
+    bookState.ownerType = "";
+    bookState.ownerOrigin = "";
+    bookState.ownerScriptId = "";
+    bookState.ownerSessionId = "";
+    bookState.backCoverCheckIndex = 0;
+    bookState.backCoverCheckDueAt = 0;
+    bookState.backCoverPageJumpLabel = "";
+    bookState.backCoverReached = false;
+    bookFastTurnInFlight = false;
+    bookBackCoverCheckInFlight = false;
+  }
+
+  function captureBookTaskIdentity() {
+    return {
+      generation: bookStateGeneration,
+      tabId: bookState.tabId,
+      mode: bookState.mode,
+      ownerType: bookState.ownerType,
+      ownerOrigin: bookState.ownerOrigin,
+      ownerScriptId: bookState.ownerScriptId,
+      ownerSessionId: bookState.ownerSessionId
+    };
+  }
+
+  function sameBookTask(identity) {
+    return !!(identity
+      && bookState.running
+      && bookStateGeneration === identity.generation
+      && Number(bookState.tabId) === Number(identity.tabId)
+      && bookState.mode === identity.mode
+      && bookState.ownerType === identity.ownerType
+      && bookState.ownerOrigin === identity.ownerOrigin
+      && bookState.ownerScriptId === identity.ownerScriptId
+      && bookState.ownerSessionId === identity.ownerSessionId
+      && !(identity.ownerType === "sdk" && sdkBookCancelledOwners[identity.ownerSessionId]));
+  }
+
+  function sameBookTaskOwner(identity) {
+    return !!(identity
+      && bookState.running
+      && Number(bookState.tabId) === Number(identity.tabId)
+      && bookState.mode === identity.mode
+      && bookState.ownerType === identity.ownerType
+      && bookState.ownerOrigin === identity.ownerOrigin
+      && bookState.ownerScriptId === identity.ownerScriptId
+      && bookState.ownerSessionId === identity.ownerSessionId);
+  }
+
+  function activeSdkBookBoundContext() {
+    return bookState.ownerType === "sdk"
+      ? { origin: String(bookState.ownerOrigin || ""), originPattern: String(bookState.originPattern || "") }
+      : null;
+  }
+
   function normalizeBackCoverCheckIndex(value) {
     var index = Math.floor(Number(value));
     if (!Number.isFinite(index) || index < 0) return 0;
@@ -1058,10 +1348,15 @@ importScripts("user-script-bridge.js");
     };
   }
 
-  function readSdkBookStatus(tabId, callback) {
+  function readSdkBookStatus(tabId, mode, callback) {
+    readSdkBookStatusBound(tabId, mode, null, callback);
+  }
+
+  function readSdkBookStatusBound(tabId, mode, boundContext, callback) {
     var targetTabId = Number(tabId);
-    runBookTurn("DETECT", targetTabId, "", "chaoxing", function (result) {
-      var sameTask = Number.isInteger(targetTabId) && Number(bookState.tabId) === targetTabId && bookState.mode === "chaoxing";
+    var selectedMode = normalizeBookMode(mode);
+    runBookTurn("DETECT", targetTabId, "", selectedMode, function (result) {
+      var sameTask = Number.isInteger(targetTabId) && Number(bookState.tabId) === targetTabId && bookState.mode === selectedMode;
       var monitor = sameTask ? bookBackCoverMonitorState() : {
         backCoverCheckEnabled: false,
         backCoverCheckIndex: 0,
@@ -1071,11 +1366,345 @@ importScripts("user-script-bridge.js");
         backCoverReached: false,
         backCoverCheckSequence: CHAOXING_BACK_COVER_CHECK_DELAYS_SECONDS.slice()
       };
-      callback(Object.assign({}, result || {}, {
-        mode: "chaoxing",
+      callback(normalizeSdkBookResult(Object.assign({}, result || {}, {
+        mode: selectedMode,
         running: !!(sameTask && bookState.running),
         interval: sameTask ? bookState.interval : 0
-      }, monitor));
+      }, monitor)));
+    }, null, boundContext);
+  }
+
+  function sdkBookOriginPattern(session) {
+    return String(session && session.originPattern || originPatternFromUrl(session && (session.url || session.origin) || ""));
+  }
+
+  function sdkBookBoundContext(session) {
+    return {
+      origin: String(session && session.origin || ""),
+      originPattern: sdkBookOriginPattern(session)
+    };
+  }
+
+  function sdkBookTaskMatches(session, mode) {
+    return !!(bookState.running
+      && bookState.ownerType === "sdk"
+      && bookState.ownerScriptId === String(session && session.scriptId || "")
+      && bookState.ownerSessionId === String(session && session.ownerSessionId || "")
+      && Number(bookState.tabId) === Number(session && session.tabId)
+      && bookState.mode === mode);
+  }
+
+  function validateSdkBookRuntimeSession(session, capability, callback) {
+    var runtimeToken = String(session && session.runtimeToken || "");
+    if (!runtimeToken) {
+      callback({ ok: false, code: "SDK_SESSION_NOT_FOUND", error: "SDK session is no longer active." });
+      return;
+    }
+    readSdkSessions().then(function (sessions) {
+      var active = sessions && sessions[runtimeToken];
+      var valid = active
+        && active.persistent === true
+        && !!active.ownerSessionId
+        && !!session.ownerSessionId
+        && active.scriptId === session.scriptId
+        && active.ownerSessionId === session.ownerSessionId
+        && active.bookMode === session.bookMode
+        && active.origin === session.origin
+        && active.originPattern === session.originPattern
+        && Number(active.tabId) === Number(session.tabId);
+      if (!valid) {
+        callback({ ok: false, code: "SDK_SESSION_NOT_FOUND", error: "SDK session is no longer active." });
+        return;
+      }
+      Promise.resolve(permissionService.validateRuntimeToken(runtimeToken, {
+        scriptId: active.scriptId,
+        sdkVersion: active.sdkVersion,
+        capability: capability,
+        origin: active.origin,
+        codeHash: active.codeHash,
+        fingerprint: active.grantFingerprint
+      })).then(function (authorization) {
+        callback(authorization && authorization.ok && authorization.valid
+          ? { ok: true }
+          : { ok: false, code: "SDK_SESSION_NOT_FOUND", error: "SDK session is no longer active." });
+      }, function () {
+        callback({ ok: false, code: "SDK_SESSION_NOT_FOUND", error: "SDK session could not be verified." });
+      });
+    }, function () {
+      callback({ ok: false, code: "SDK_SESSION_NOT_FOUND", error: "SDK session could not be verified." });
+    });
+  }
+
+  function normalizeSdkBookResult(result) {
+    if (!result || result.ok !== false) return result;
+    var error = String(result.error || "");
+    if (/permission|cannot access contents|missing host|not allowed to access|权限|无权|无法访问|不允许访问/i.test(error)) {
+      return Object.assign({}, result, {
+        code: "BOOK_PAGE_PERMISSION_REQUIRED",
+        error: "Book page permission is missing. Open the Book panel once and authorize the reader page, then run the script again."
+      });
+    }
+    if (/^(?:BOOK_|SDK_)/.test(String(result.code || ""))) return result;
+    return Object.assign({}, result, {
+      code: "SDK_BOOK_FAILED",
+      error: "Book reader operation failed."
+    });
+  }
+
+  function enqueueSdkBookMutation(task, callback) {
+    var operation = sdkBookMutationQueue.then(function () {
+      return new Promise(function (resolve) { task(resolve); });
+    });
+    sdkBookMutationQueue = operation.then(function () {}, function () {});
+    operation.then(callback, function (error) {
+      callback({ ok: false, code: "SDK_BOOK_FAILED", error: "Book reader operation failed." });
+    });
+  }
+
+  function sdkBookOwnerId(value) {
+    return String(value || "");
+  }
+
+  function registerSdkBookPendingOwner(session) {
+    var ownerSessionId = sdkBookOwnerId(session && session.ownerSessionId);
+    if (!ownerSessionId) return "";
+    var pending = sdkBookPendingOwners[ownerSessionId];
+    if (pending) pending.count += 1;
+    else {
+      sdkBookPendingOwners[ownerSessionId] = {
+        scriptId: String(session && session.scriptId || ""),
+        tabId: Number(session && session.tabId),
+        count: 1
+      };
+    }
+    return ownerSessionId;
+  }
+
+  function unregisterSdkBookPendingOwner(ownerSessionId) {
+    ownerSessionId = sdkBookOwnerId(ownerSessionId);
+    var pending = ownerSessionId && sdkBookPendingOwners[ownerSessionId];
+    if (!pending) return;
+    pending.count -= 1;
+    if (pending.count <= 0) delete sdkBookPendingOwners[ownerSessionId];
+  }
+
+  function sdkBookOwnerMatches(criteria, ownerSessionId, scriptId, tabId) {
+    criteria = criteria || {};
+    if (criteria.all === true) return true;
+    if (criteria.ownerSessionId) return String(criteria.ownerSessionId) === String(ownerSessionId || "");
+    return !!criteria.scriptId
+      && String(criteria.scriptId) === String(scriptId || "")
+      && (criteria.tabId == null || Number(criteria.tabId) === Number(tabId));
+  }
+
+  function cancelSdkBookOwners(criteria) {
+    var cancelled = [];
+    Object.keys(sdkBookPendingOwners).forEach(function (ownerSessionId) {
+      var pending = sdkBookPendingOwners[ownerSessionId] || {};
+      if (!sdkBookOwnerMatches(criteria, ownerSessionId, pending.scriptId, pending.tabId)) return;
+      sdkBookCancelledOwners[ownerSessionId] = true;
+      cancelled.push(ownerSessionId);
+    });
+    if (bookState.running
+        && bookState.ownerType === "sdk"
+        && sdkBookOwnerMatches(criteria, bookState.ownerSessionId, bookState.ownerScriptId, bookState.tabId)) {
+      sdkBookCancelledOwners[bookState.ownerSessionId] = true;
+      if (cancelled.indexOf(bookState.ownerSessionId) < 0) cancelled.push(bookState.ownerSessionId);
+      bookStateGeneration += 1;
+    }
+    return cancelled;
+  }
+
+  function clearSdkBookCancellations(ownerSessionIds) {
+    (ownerSessionIds || []).forEach(function (ownerSessionId) {
+      delete sdkBookCancelledOwners[ownerSessionId];
+    });
+  }
+
+  function controlSdkBookStateAuthorized(session, request, command, selectedMode, tabId, originPattern, callback) {
+    if (command === "START") {
+      if (sdkBookCancelledOwners[sdkBookOwnerId(session && session.ownerSessionId)]) {
+        callback({ ok: false, code: "BOOK_TASK_CANCELLED", error: "The SDK session was closed before the book task started." });
+        return;
+      }
+      if (bookState.running) {
+        callback({
+          ok: false,
+          code: sdkBookTaskMatches(session, selectedMode) ? "BOOK_TASK_ALREADY_RUNNING" : "BOOK_TASK_CONFLICT",
+          error: sdkBookTaskMatches(session, selectedMode)
+            ? "This SDK script already has a book auto-turn task."
+            : "Another book auto-turn task is already running."
+        });
+        return;
+      }
+      handleBookPanel({
+        command: "START",
+        mode: selectedMode,
+        interval: request.interval,
+        tabId: tabId,
+        originPattern: originPattern,
+        sdkOwnerOrigin: String(session.origin || ""),
+        sdkOwnerScriptId: String(session.scriptId || ""),
+        sdkOwnerSessionId: String(session.ownerSessionId || ""),
+        expectedGeneration: bookStateGeneration
+      }, function (result) { callback(normalizeSdkBookResult(result)); });
+      return;
+    }
+    if (command === "STOP") {
+      if (!bookState.running) {
+        callback({ ok: true, detected: false, mode: selectedMode, running: false, interval: 0 });
+        return;
+      }
+      if (bookState.ownerType !== "sdk"
+          || bookState.ownerScriptId !== String(session.scriptId || "")
+          || bookState.ownerSessionId !== String(session.ownerSessionId || "")
+          || Number(bookState.tabId) !== tabId) {
+        callback({ ok: false, code: "BOOK_TASK_CONFLICT", error: "The active book task belongs to another page or script." });
+        return;
+      }
+      handleBookPanel({ command: "STOP", mode: bookState.mode }, callback);
+      return;
+    }
+    if (!bookState.running) {
+      callback({ ok: false, code: "BOOK_TASK_NOT_RUNNING", error: "Start this script's book auto-turn task before changing its interval." });
+      return;
+    }
+    if (bookState.ownerType !== "sdk"
+        || bookState.ownerScriptId !== String(session.scriptId || "")
+        || bookState.ownerSessionId !== String(session.ownerSessionId || "")
+        || Number(bookState.tabId) !== tabId) {
+      callback({ ok: false, code: "BOOK_TASK_CONFLICT", error: "The active book task belongs to another page or script." });
+      return;
+    }
+    if (bookState.mode !== selectedMode) {
+      callback({ ok: false, code: "BOOK_TASK_MODE_MISMATCH", error: "The interval mode must match the active book task." });
+      return;
+    }
+    handleBookPanel({ command: "SET_INTERVAL", mode: selectedMode, interval: request.interval }, callback);
+  }
+
+  function controlSdkBookState(session, request, command, selectedMode, tabId, originPattern, callback) {
+    validateSdkBookRuntimeSession(session, "book.control", function (validation) {
+      if (!validation.ok) {
+        callback(validation);
+        return;
+      }
+      validateSdkBoundPage({ tabId: tabId }, sdkBookBoundContext(session), function (contextFailure) {
+        if (contextFailure) {
+          callback(contextFailure);
+          return;
+        }
+        controlSdkBookStateAuthorized(session, request, command, selectedMode, tabId, originPattern, callback);
+      });
+    });
+  }
+
+  function controlSdkBook(session, request, callback) {
+    request = request || {};
+    var command = String(request.command || "GET_STATUS");
+    var authorizedMode = String(session && session.bookMode || "");
+    if (["book", "image", "chaoxing"].indexOf(authorizedMode) < 0) {
+      callback({ ok: false, code: "SDK_BOOK_MODE_REQUIRED", error: "This SDK session has no book authorization mode." });
+      return;
+    }
+    var selectedMode = request.mode == null ? authorizedMode : normalizeBookMode(request.mode);
+    var tabId = Number(session && session.tabId);
+    var originPattern = sdkBookOriginPattern(session);
+    var boundContext = sdkBookBoundContext(session);
+
+    if (selectedMode !== authorizedMode) {
+      callback({ ok: false, code: "BOOK_MODE_NOT_AUTHORIZED", error: "The requested book mode was not approved for this SDK session." });
+      return;
+    }
+
+    if (!Number.isInteger(tabId)) {
+      callback({ ok: false, code: "SDK_TAB_REQUIRED", error: "This book method requires an authorized web page." });
+      return;
+    }
+    if (command === "GET_STATUS") {
+      validateSdkBookRuntimeSession(session, "book.read", function (validation) {
+        if (!validation.ok) {
+          callback(validation);
+          return;
+        }
+        readSdkBookStatusBound(tabId, selectedMode, boundContext, function (result) {
+          callback(normalizeSdkBookResult(result));
+        });
+      });
+      return;
+    }
+    if (!originPattern && (command === "PREV" || command === "NEXT" || command === "START")) {
+      callback({ ok: false, code: "BOOK_PAGE_PERMISSION_REQUIRED", error: "Book page authorization is missing." });
+      return;
+    }
+    if (command === "PREV" || command === "NEXT") {
+      var turnOwnerSessionId = registerSdkBookPendingOwner(session);
+      enqueueSdkBookMutation(function (done) {
+        validateSdkBookRuntimeSession(session, "book.control", function (validation) {
+          if (!validation.ok) {
+            done(validation);
+            return;
+          }
+          runBookTurn(command, tabId, originPattern, selectedMode, function (result) {
+            done(normalizeSdkBookResult(Object.assign({}, result || {}, {
+              ok: !!(result && result.ok),
+              mode: selectedMode,
+              running: sdkBookTaskMatches(session, selectedMode),
+              interval: sdkBookTaskMatches(session, selectedMode) ? bookState.interval : 0
+            })));
+          }, function () {
+            return !sdkBookCancelledOwners[sdkBookOwnerId(session && session.ownerSessionId)];
+          }, boundContext);
+        });
+      }, function (result) {
+        unregisterSdkBookPendingOwner(turnOwnerSessionId);
+        callback(result);
+      });
+      return;
+    }
+    if (command === "START" || command === "STOP" || command === "SET_INTERVAL") {
+      var pendingOwnerSessionId = command === "START" ? registerSdkBookPendingOwner(session) : "";
+      var stopCancelledOwnerSessionIds = command === "STOP"
+        ? cancelSdkBookOwners({ ownerSessionId: sdkBookOwnerId(session && session.ownerSessionId) })
+        : [];
+      enqueueSdkBookMutation(function (done) {
+        controlSdkBookState(session, request, command, selectedMode, tabId, originPattern, done);
+      }, function (result) {
+        unregisterSdkBookPendingOwner(pendingOwnerSessionId);
+        if (result && result.ok !== false) clearSdkBookCancellations(stopCancelledOwnerSessionIds);
+        callback(result);
+      });
+      return;
+    }
+    callback({ ok: false, code: "SDK_METHOD_NOT_ALLOWED", error: "Unknown book SDK command." });
+  }
+
+  function releaseSdkBookResources(criteria) {
+    criteria = criteria || {};
+    var cancelledOwnerSessionIds = cancelSdkBookOwners(criteria);
+    return new Promise(function (resolve) {
+      enqueueSdkBookMutation(function (done) {
+        if (!bookState.running || bookState.ownerType !== "sdk") {
+          done({ ok: true, released: false });
+          return;
+        }
+        var matches = sdkBookOwnerMatches(
+          criteria,
+          bookState.ownerSessionId,
+          bookState.ownerScriptId,
+          bookState.tabId
+        );
+        if (!matches) {
+          done({ ok: true, released: false });
+          return;
+        }
+        handleBookPanel({ command: "STOP", mode: bookState.mode }, function (result) {
+          done(Object.assign({ released: !!(result && result.ok) }, result || { ok: false, error: "Book task cleanup failed." }));
+        });
+      }, function (result) {
+        if (result && result.ok !== false) clearSdkBookCancellations(cancelledOwnerSessionIds);
+        resolve(result);
+      });
     });
   }
 
@@ -1095,8 +1724,10 @@ importScripts("user-script-bridge.js");
 
   function runChaoxingBackCoverCheck() {
     if (!bookState.running || bookState.mode !== "chaoxing" || bookBackCoverCheckInFlight) return;
+    var taskIdentity = captureBookTaskIdentity();
     bookBackCoverCheckInFlight = true;
     runBookTurn("DETECT", bookState.tabId, bookState.originPattern, "chaoxing", function (res) {
+      if (!sameBookTask(taskIdentity)) return;
       bookBackCoverCheckInFlight = false;
       var reachedBackCover = !!(res && res.ok && res.pageJumpDetected && res.isBackCover && String(res.pageJumpLabel || "").replace(/\s+/g, "") === "封底页");
       bookState.backCoverPageJumpLabel = String(res && res.pageJumpLabel || "");
@@ -1113,11 +1744,7 @@ importScripts("user-script-bridge.js");
           running: false,
           message: "\u5df2\u68c0\u6d4b\u5230\u5c01\u5e95\u9875\uff0c\u5b66\u4e60\u901a\u81ea\u52a8\u7ffb\u9605\u5df2\u505c\u6b62\u3002"
         });
-        bookState.running = false;
-        bookState.tabId = null;
-        bookState.originPattern = "";
-        bookState.backCoverCheckIndex = 0;
-        bookState.backCoverCheckDueAt = 0;
+        clearBookRunningState();
         saveBookState(scheduleBookAlarm);
         return;
       }
@@ -1127,7 +1754,7 @@ importScripts("user-script-bridge.js");
       );
       bookState.backCoverCheckDueAt = Date.now() + CHAOXING_BACK_COVER_CHECK_DELAYS_SECONDS[bookState.backCoverCheckIndex] * 1000;
       saveBookState(scheduleBookBackCoverAlarm);
-    });
+    }, null, activeSdkBookBoundContext());
   }
 
   function isFastChaoxingBookInterval() {
@@ -1154,8 +1781,10 @@ importScripts("user-script-bridge.js");
       scheduleBookFastTurn();
       return;
     }
+    var taskIdentity = captureBookTaskIdentity();
     bookFastTurnInFlight = true;
     runBookTurn("NEXT", bookState.tabId, bookState.originPattern, bookState.mode, function (res) {
+      if (!sameBookTask(taskIdentity)) return;
       bookFastTurnInFlight = false;
       appendBackgroundLog("\u56fe\u4e66", res && res.ok ? "\u5b66\u4e60\u901a\u5feb\u901f\u81ea\u52a8\u7ffb\u9875\u6210\u529f" : "\u5b66\u4e60\u901a\u5feb\u901f\u81ea\u52a8\u7ffb\u9875\u5931\u8d25", {
         "\u95f4\u9694": bookState.interval + "s",
@@ -1164,18 +1793,12 @@ importScripts("user-script-bridge.js");
         "\u539f\u56e0": res && res.error || "-"
       }, res && res.ok ? "success" : "error");
       if (!res || !res.ok) {
-        bookState.running = false;
-        bookState.tabId = null;
-        bookState.originPattern = "";
-        bookState.backCoverCheckIndex = 0;
-        bookState.backCoverCheckDueAt = 0;
-        bookState.backCoverPageJumpLabel = "";
-        bookState.backCoverReached = false;
+        clearBookRunningState();
         saveBookState(scheduleBookAlarm);
         return;
       }
       scheduleBookFastTurn();
-    });
+    }, function () { return sameBookTask(taskIdentity); }, activeSdkBookBoundContext());
   }
 
   function scheduleBookAlarm() {
@@ -1220,16 +1843,11 @@ importScripts("user-script-bridge.js");
       return;
     }
     if (command === "STOP") {
-      bookState.running = false;
-      bookState.tabId = null;
-      bookState.originPattern = "";
-      bookState.backCoverCheckIndex = 0;
-      bookState.backCoverCheckDueAt = 0;
-      bookState.backCoverPageJumpLabel = "";
-      bookState.backCoverReached = false;
+      var stoppedMode = bookState.mode;
+      clearBookRunningState();
       saveBookState(function () {
         scheduleBookAlarm();
-        callback(Object.assign({ ok: true, running: false, interval: bookState.interval, message: "Book auto turn stopped." }, bookBackCoverMonitorState()));
+        callback(Object.assign({ ok: true, running: false, interval: bookState.interval, mode: stoppedMode, message: "Book auto turn stopped." }, bookBackCoverMonitorState()));
       });
       return;
     }
@@ -1238,7 +1856,7 @@ importScripts("user-script-bridge.js");
       if (!bookState.running) bookState.mode = requestedMode;
       saveBookState(function () {
         scheduleBookAlarm();
-        callback(Object.assign({ ok: true, running: bookState.running, interval: bookState.interval }, bookBackCoverMonitorState()));
+        callback(Object.assign({ ok: true, running: bookState.running, interval: bookState.interval, mode: bookState.mode }, bookBackCoverMonitorState()));
       });
       return;
     }
@@ -1249,28 +1867,53 @@ importScripts("user-script-bridge.js");
           callback({ ok: false, running: false, interval: bookState.interval, error: err || "Site authorization is required." });
           return;
         }
+        if (req.sdkOwnerSessionId && sdkBookCancelledOwners[String(req.sdkOwnerSessionId)]) {
+          callback({ ok: false, code: "BOOK_TASK_CANCELLED", error: "The SDK session was closed before the book task started." });
+          return;
+        }
+        if (bookState.running || (req.sdkOwnerScriptId && Number(req.expectedGeneration) !== bookStateGeneration)) {
+          callback({ ok: false, code: "BOOK_TASK_CONFLICT", error: "Another book auto-turn task is already running or the task state changed." });
+          return;
+        }
+        bookStateGeneration += 1;
         bookState.running = true;
         bookState.tabId = tab.id;
         bookState.originPattern = requested.originPattern;
         bookState.mode = requestedMode;
+        bookState.ownerType = req.sdkOwnerScriptId ? "sdk" : "popup";
+        bookState.ownerOrigin = bookState.ownerType === "sdk" ? String(req.sdkOwnerOrigin || "") : "";
+        bookState.ownerScriptId = req.sdkOwnerScriptId ? String(req.sdkOwnerScriptId) : "";
+        bookState.ownerSessionId = bookState.ownerType === "sdk" ? String(req.sdkOwnerSessionId || "") : "";
         bookState.backCoverCheckIndex = 0;
         bookState.backCoverCheckDueAt = requestedMode === "chaoxing"
           ? Date.now() + CHAOXING_BACK_COVER_CHECK_DELAYS_SECONDS[0] * 1000
           : 0;
         bookState.backCoverPageJumpLabel = "";
         bookState.backCoverReached = false;
+        var startedTaskIdentity = captureBookTaskIdentity();
         saveBookState(function () {
+          if (!sameBookTask(startedTaskIdentity)) {
+            callback({ ok: false, code: "BOOK_TASK_CANCELLED", error: "Book task was cancelled before the first turn." });
+            return;
+          }
           bookFastTurnInFlight = true;
           runBookTurn("NEXT", bookState.tabId, bookState.originPattern, bookState.mode, function (res) {
+            if (!sameBookTask(startedTaskIdentity)) {
+              var cancelled = { ok: false, code: "BOOK_TASK_CANCELLED", error: "Book task changed before the first turn completed." };
+              if (!sameBookTaskOwner(startedTaskIdentity)) {
+                callback(cancelled);
+                return;
+              }
+              clearBookRunningState();
+              saveBookState(function () {
+                scheduleBookAlarm();
+                callback(cancelled);
+              });
+              return;
+            }
             bookFastTurnInFlight = false;
             if (!res.ok) {
-              bookState.running = false;
-              bookState.tabId = null;
-              bookState.originPattern = "";
-              bookState.backCoverCheckIndex = 0;
-              bookState.backCoverCheckDueAt = 0;
-              bookState.backCoverPageJumpLabel = "";
-              bookState.backCoverReached = false;
+              clearBookRunningState();
               saveBookState(scheduleBookAlarm);
             } else {
               scheduleBookAlarm();
@@ -1280,7 +1923,7 @@ importScripts("user-script-bridge.js");
               running: bookState.running,
               interval: bookState.interval
             }, bookBackCoverMonitorState()));
-          });
+          }, function () { return sameBookTask(startedTaskIdentity); }, activeSdkBookBoundContext());
         });
       });
       return;
@@ -1300,7 +1943,12 @@ importScripts("user-script-bridge.js");
       callback({ ok: false, error: "Script is too large." });
       return;
     }
-    if (!scriptId || req.permissionConfirmed !== true || !permissions.length) {
+    if (!scriptId ||
+        req.permissionConfirmed !== true ||
+        permissions.indexOf("dom") < 0 ||
+        permissions.some(function (permission, index, list) {
+          return ["dom", "network", "automation"].indexOf(permission) < 0 || list.indexOf(permission) !== index;
+        })) {
       callback({ ok: false, error: "脚本权限尚未确认。" });
       return;
     }
@@ -1322,7 +1970,7 @@ importScripts("user-script-bridge.js");
         return;
       }
       try { var url = tab.url || ""; if (isInternalUrl(url)) { callback({ ok: false, error: "\u5f53\u524d\u9875\u9762\u662f\u6d4f\u89c8\u5668\u5185\u90e8\u9875\u9762\uff0c\u4e0d\u80fd\u8fd0\u884c\u811a\u672c\u3002\u8bf7\u5148\u5207\u6362\u5230\u666e\u901a\u7f51\u9875\u518d\u8fd0\u884c\u3002" }); return; } } catch (e) {}
-        self.WinSpeedBallUserScriptService.execute(scriptId, code, tab.id).then(function () {
+        self.WinSpeedBallUserScriptService.execute(scriptId, code, permissions, tab.id).then(function () {
           callback({ ok: true });
         }).catch(function (error) {
           callback({ ok: false, code: error && error.code || "USER_SCRIPT_EXECUTION_FAILED", error: error && error.message || String(error) });
@@ -1356,11 +2004,26 @@ importScripts("user-script-bridge.js");
     chrome.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
       if (changeInfo && changeInfo.url) rememberAccessibleTab(tab);
     });
+    chrome.tabs.onRemoved.addListener(function (tabId) {
+      releaseSdkTabSessions(tabId, "");
+    });
+  } catch (e) {}
+
+  try {
+    chrome.webNavigation.onCommitted.addListener(function (details) {
+      if (!details || details.frameId !== 0 || !Number.isInteger(details.tabId)) return;
+      if (details.documentLifecycle === "prerender") return;
+      releaseSdkTabSessions(details.tabId, sdkOrigin(details.url));
+    });
   } catch (e) {}
 
   try {
     chrome.alarms.onAlarm.addListener(function (alarm) {
       if (!alarm) return;
+      if (alarm.name === SDK_LIFECYCLE_MAINTENANCE_ALARM) {
+        inspectSdkLifecycleCleanup("maintenance-alarm", sdkService.pruneSessions());
+        return;
+      }
       if (voiceService.handleAlarm(alarm)) return;
       if (alarm.name === BOOK_BACK_COVER_ALARM) {
         if (bookState.running && bookState.mode === "chaoxing") runChaoxingBackCoverCheck();
@@ -1383,7 +2046,9 @@ importScripts("user-script-bridge.js");
           if (bookFastTimer == null && !bookFastTurnInFlight) scheduleBookFastTurn();
           return;
         }
+        var taskIdentity = captureBookTaskIdentity();
         runBookTurn("NEXT", bookState.tabId, bookState.originPattern, bookState.mode, function (res) {
+          if (!sameBookTask(taskIdentity)) return;
           appendBackgroundLog("图书", res && res.ok ? "自动翻页执行成功" : "自动翻页执行失败", {
             方向: "下一页",
             间隔: bookState.interval + "s",
@@ -1397,16 +2062,10 @@ importScripts("user-script-bridge.js");
             原因: res && res.error || "-"
           }, res && res.ok ? "success" : "error");
           if (!res || !res.ok) {
-            bookState.running = false;
-            bookState.tabId = null;
-            bookState.originPattern = "";
-            bookState.backCoverCheckIndex = 0;
-            bookState.backCoverCheckDueAt = 0;
-            bookState.backCoverPageJumpLabel = "";
-            bookState.backCoverReached = false;
+            clearBookRunningState();
             saveBookState(scheduleBookAlarm);
           }
-        });
+        }, function () { return sameBookTask(taskIdentity); }, activeSdkBookBoundContext());
       }
     });
   } catch (e) {}
@@ -1562,7 +2221,7 @@ importScripts("user-script-bridge.js");
     canUseFeature: function (request) { return featureGate.check(request.feature); },
     getDeveloperMode: function () { return developerModeService.getStatus(); },
     setDeveloperMode: function (request) { return updateDeveloperMode(request); },
-    prepareSdkContext: function (request) { return sdkContextService.prepare(request.capabilities); },
+    prepareSdkContext: function (request) { return sdkContextService.prepare(request.capabilities, request.bookMode); },
     prepareSdkSession: function (request) { return sdkService.prepareSession(request); },
     invokeSdkSession: function (request) { return sdkService.invoke(request.sessionToken, request.request); },
     getSdkSessionStatus: function (request) { return sdkService.getSessionStatus(request.sessionToken); },
@@ -1573,6 +2232,9 @@ importScripts("user-script-bridge.js");
     getPrivacySummary: function () { return privacyService.getSummary(); },
     clearPrivacyData: function (request) { return clearPrivacyData(request); },
     openPinnedWindow: function () { return windowService.openPinnedWindow(); },
+    setPinnedWindowTeachingMode: function (request, sender) {
+      return windowService.setTeachingMode(request.enabled, sender && sender.tab && sender.tab.windowId);
+    },
     registerUser: function (request) { return userService.register(request); },
     loginUser: function (request) { return userService.login(request); },
     logoutUser: function () { return userService.logout(); },
@@ -1595,9 +2257,17 @@ importScripts("user-script-bridge.js");
     askAI: function (request, sender, respond, message) {
       return gateAction("ai.basic", function () {
         callAi(message.payload, function (result) {
-          if (result && result.ok) showAiReplyWindow({ content: result.content }, function () {});
+          if (result && result.ok) showAiReplyWindow({
+            content: result.content,
+            truncated: result.truncated === true
+          }, function () {});
           respond(result);
         });
+      }, respond);
+    },
+    askAiTeaching: function (request, sender, respond, message) {
+      return gateAction("ai.basic", function () {
+        callAi(message.payload, respond);
       }, respond);
     },
     testDeepSeek: function (request, sender, respond) {
@@ -1606,7 +2276,10 @@ importScripts("user-script-bridge.js");
     askDeepSeek: function (request, sender, respond, message) {
       return gateAction("ai.basic", function () {
         callAi(message.payload, function (result) {
-          if (result && result.ok) showAiReplyWindow({ content: result.content }, function () {});
+          if (result && result.ok) showAiReplyWindow({
+            content: result.content,
+            truncated: result.truncated === true
+          }, function () {});
           respond(result);
         });
       }, respond);
@@ -1621,6 +2294,7 @@ importScripts("user-script-bridge.js");
     });
     chrome.permissions.onRemoved.addListener(function (permissions) {
       var removed = permissions && permissions.origins || [];
+      if (removed.length) releaseSdkOriginSessions(removed);
       var stoppedTasks = [];
       if (douyinState.originPattern && removed.indexOf(douyinState.originPattern) >= 0) {
         douyinState.running = false;
@@ -1630,13 +2304,7 @@ importScripts("user-script-bridge.js");
         stoppedTasks.push("自动下一条");
       }
       if (bookState.originPattern && removed.indexOf(bookState.originPattern) >= 0) {
-        bookState.running = false;
-        bookState.tabId = null;
-        bookState.originPattern = "";
-        bookState.backCoverCheckIndex = 0;
-        bookState.backCoverCheckDueAt = 0;
-        bookState.backCoverPageJumpLabel = "";
-        bookState.backCoverReached = false;
+        clearBookRunningState();
         saveBookState(scheduleBookAlarm);
         stoppedTasks.push("图书自动翻页");
       }
@@ -1699,14 +2367,64 @@ importScripts("user-script-bridge.js");
     bookState.originPattern = String(d.bookPanelState.originPattern || "");
     bookState.mode = normalizeBookMode(d.bookPanelState.mode);
     bookState.interval = normalizeBookInterval(d.bookPanelState.interval, bookState.mode);
+    bookState.ownerType = bookState.running && d.bookPanelState.ownerType === "sdk" ? "sdk" : (bookState.running ? "popup" : "");
+    bookState.ownerOrigin = bookState.ownerType === "sdk" ? String(d.bookPanelState.ownerOrigin || "") : "";
+    bookState.ownerScriptId = bookState.ownerType === "sdk" ? String(d.bookPanelState.ownerScriptId || "") : "";
+    bookState.ownerSessionId = bookState.ownerType === "sdk" ? String(d.bookPanelState.ownerSessionId || "") : "";
     bookState.backCoverCheckIndex = normalizeBackCoverCheckIndex(d.bookPanelState.backCoverCheckIndex);
     bookState.backCoverCheckDueAt = Number.isFinite(Number(d.bookPanelState.backCoverCheckDueAt))
       ? Math.max(0, Number(d.bookPanelState.backCoverCheckDueAt))
       : 0;
     bookState.backCoverPageJumpLabel = String(d.bookPanelState.backCoverPageJumpLabel || "");
     bookState.backCoverReached = !!d.bookPanelState.backCoverReached;
-    scheduleBookAlarm();
+    if (bookState.ownerType !== "sdk") {
+      scheduleBookAlarm();
+      return;
+    }
+    readSdkSessions().then(function (sessions) {
+      var ownerToken = Object.keys(sessions || {}).find(function (token) {
+        var session = sessions[token];
+        return session
+          && session.persistent === true
+          && !!bookState.ownerSessionId
+          && session.scriptId === bookState.ownerScriptId
+           && session.ownerSessionId === bookState.ownerSessionId
+           && session.bookMode === bookState.mode
+           && session.originPattern === bookState.originPattern
+           && Number(session.tabId) === Number(bookState.tabId);
+      });
+      var ownerSession = ownerToken && sessions[ownerToken];
+      if (!ownerSession) {
+        clearBookRunningState();
+        saveBookState(scheduleBookAlarm);
+        return;
+      }
+      bookState.ownerOrigin = String(ownerSession.origin || "");
+      Promise.resolve(permissionService.validateRuntimeToken(ownerToken, {
+        scriptId: ownerSession.scriptId,
+        sdkVersion: ownerSession.sdkVersion,
+        capability: "book.control",
+        origin: ownerSession.origin,
+        codeHash: ownerSession.codeHash,
+        fingerprint: ownerSession.grantFingerprint
+      })).then(function (authorization) {
+        if (!authorization || !authorization.ok || !authorization.valid) clearBookRunningState();
+        saveBookState(scheduleBookAlarm);
+      }, function () {
+        clearBookRunningState();
+        saveBookState(scheduleBookAlarm);
+      });
+    }, function (error) {
+      clearBookRunningState();
+      saveBookState(scheduleBookAlarm);
+      scheduleSdkLifecycleMaintenance("book-session-hydration", error && error.ok === false ? error : {
+        ok: false,
+        code: "SDK_SESSION_STORAGE_FAILED",
+        error: error && error.message || String(error)
+      });
+    });
   });
+  inspectSdkLifecycleCleanup("startup-prune", sdkService.pruneSessions());
   syncRegisteredUserScripts("后台启动");
   resumePendingOcrJob();
 })();

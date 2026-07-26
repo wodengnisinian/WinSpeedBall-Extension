@@ -21,6 +21,90 @@ function loadVideoService() {
   return context.self.WinSpeedBallVideoService.create();
 }
 
+function loadBoundVideoService() {
+  let currentUrl = "https://course.example.test/video";
+  let delayedVerification = null;
+  let injectionCount = 0;
+  let nextUrlDuringInjection = "";
+  const executedTargets = [];
+  const chrome = {
+    runtime: { lastError: null },
+    tabs: {
+      get(tabId, callback) {
+        callback({ id: tabId, url: currentUrl });
+      }
+    },
+    webNavigation: {
+      getAllFrames({ tabId }, callback) {
+        callback([{
+          frameId: 0,
+          documentId: currentUrl.includes("attacker") ? "document-attacker" : "document-course",
+          url: currentUrl
+        }]);
+      }
+    },
+    scripting: {
+      executeScript(details, callback) {
+        injectionCount += 1;
+        executedTargets.push(JSON.parse(JSON.stringify(details.target)));
+        const command = details.args && details.args[0] || {};
+        if (nextUrlDuringInjection) {
+          currentUrl = nextUrlDuringInjection;
+          nextUrlDuringInjection = "";
+        }
+        callback([{
+          frameId: 0,
+          result: {
+            ok: true,
+            mediaCount: 1,
+            applied: 1,
+            rate: Number(command.rate || 2),
+            targetRate: Number(command.rate || 2),
+            rateLocked: true,
+            rateStable: true,
+            volume: 0.8,
+            muted: false
+          }
+        }]);
+      }
+    }
+  };
+  const context = {
+    self: {
+      WinSpeedBallStorageService: {
+        get(keys, callback) { callback({}); },
+        set(data, callback) { if (callback) callback({ ok: true }); }
+      }
+    },
+    chrome,
+    URL,
+    Promise,
+    Object,
+    Array,
+    String,
+    Number,
+    Set,
+    setTimeout(callback, delay) {
+      delayedVerification = { callback, delay };
+      return 1;
+    }
+  };
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(root, "background/video-service.js"), "utf8"), context);
+  return {
+    service: context.self.WinSpeedBallVideoService.create(),
+    navigate(url) { currentUrl = url; },
+    navigateDuringNextInjection(url) { nextUrlDuringInjection = url; },
+    disableDocumentBinding() { delete chrome.webNavigation; },
+    runDelayedVerification() {
+      assert.ok(delayedVerification);
+      delayedVerification.callback();
+    },
+    getInjectionCount() { return injectionCount; },
+    getExecutedTargets() { return executedTargets.slice(); }
+  };
+}
+
 function loadContentScript(mediaDefinitions) {
   const documentListeners = new Map();
   const windowListeners = new Map();
@@ -152,6 +236,80 @@ function loadContentScript(mediaDefinitions) {
   };
 }
 
+function loadMainMediaCore() {
+  function HTMLMediaElement() {}
+  const mediaValues = new WeakMap();
+  function valuesFor(media) {
+    if (!mediaValues.has(media)) mediaValues.set(media, {
+      playbackRate: 1,
+      defaultPlaybackRate: 1,
+      volume: 0.8,
+      muted: false
+    });
+    return mediaValues.get(media);
+  }
+  for (const property of ["playbackRate", "defaultPlaybackRate", "volume", "muted"]) {
+    Object.defineProperty(HTMLMediaElement.prototype, property, {
+      configurable: true,
+      enumerable: true,
+      get() { return valuesFor(this)[property]; },
+      set(value) { valuesFor(this)[property] = value; }
+    });
+  }
+  HTMLMediaElement.prototype.play = function () { this.paused = false; return Promise.resolve(); };
+  HTMLMediaElement.prototype.pause = function () { this.paused = true; };
+  HTMLMediaElement.prototype.load = function () {};
+  HTMLMediaElement.prototype.addEventListener = function () {};
+
+  const sessionValues = new Map();
+  const intervals = new Map();
+  let timerSequence = 0;
+  const document = {
+    body: { appendChild() { throw new Error("No iframe runtime in test."); } },
+    documentElement: { appendChild() { throw new Error("No iframe runtime in test."); } },
+    createElement() {
+      return { style: {}, setAttribute() {}, parentNode: null, contentWindow: null };
+    },
+    addEventListener() {},
+    querySelector() { return null; },
+    querySelectorAll() { return []; }
+  };
+  const context = {
+    HTMLMediaElement,
+    document,
+    location: { href: "https://example.test/video", hostname: "example.test" },
+    sessionStorage: {
+      getItem(key) { return sessionValues.has(key) ? sessionValues.get(key) : null; },
+      setItem(key, value) { sessionValues.set(key, String(value)); },
+      removeItem(key) { sessionValues.delete(key); }
+    },
+    MutationObserver: class { observe() {} },
+    Promise,
+    Date,
+    URL,
+    setTimeout() { return ++timerSequence; },
+    clearTimeout() {},
+    setInterval(callback, delay) {
+      const id = ++timerSequence;
+      intervals.set(id, { callback, delay });
+      return id;
+    },
+    clearInterval(id) { intervals.delete(id); },
+    requestAnimationFrame() { return ++timerSequence; },
+    cancelAnimationFrame() {},
+    addEventListener() {},
+    removeEventListener() {}
+  };
+  context.window = context;
+  vm.createContext(context);
+  vm.runInContext(fs.readFileSync(path.join(root, "content/media-core-main.js"), "utf8"), context);
+  return {
+    api: context.WinSpeedBallMediaCoreV7,
+    intervals,
+    sessionValues
+  };
+}
+
 test("VideoService 聚合稳定媒体 ID、帧和控制模式", () => {
   const service = loadVideoService();
   const result = service.aggregateFrameResults([
@@ -167,14 +325,72 @@ test("VideoService 将媒体控制发送到页面主环境", () => {
   const source = fs.readFileSync(path.join(root, "background/video-service.js"), "utf8");
   assert.match(source, /world:\s*"MAIN"/);
   assert.match(source, /files:\s*\["content\/shadow-hook\.js",\s*"content\/media-core-main\.js"\]/);
-  assert.match(source, /WinSpeedBallMediaCoreV6\.handleCommand/);
+  assert.match(source, /WinSpeedBallMediaCoreV7\.handleCommand/);
   assert.match(source, /command\.type === "EXTRACT_PAGE_TEXT"[\s\S]*?sendIsolatedCommandToAllFrames/);
   assert.match(source, /authoritative = mediaInfo \|\| firstOk/);
   assert.match(source, /rateLocked:\s*authoritative \? authoritative\.rateLocked === true : false/);
   assert.match(source, /verifiedAfterMs:\s*700/);
   assert.match(source, /ok:\s*rateStable/);
   assert.match(source, /main media core upgrade required/);
-  assert.match(source, /legacy\.handleCommand\(\{ type: "STOP_LOCK" \}\)/);
+  assert.match(source, /if \(!window\.WinSpeedBallMediaCoreV7 && legacy && typeof legacy\.handleCommand === "function"\)/);
+  assert.match(source, /function bindSdkDocumentTarget\(tabId,\s*details,\s*boundContext,\s*callback\)[\s\S]*?chrome\.webNavigation\.getAllFrames/);
+  assert.match(source, /target:\s*\{ tabId: tabId,\s*documentIds: documentIds \}/);
+});
+
+test("SDK 倍速延迟校验会在标签页跨来源后拒绝再次注入", () => {
+  const fixture = loadBoundVideoService();
+  let result = null;
+  fixture.service.controlTab(9, { type: "SET_RATE", rate: 2 }, (value) => {
+    result = value;
+  }, {
+    origin: "https://course.example.test",
+    originPattern: "https://course.example.test/*"
+  });
+
+  assert.equal(fixture.getInjectionCount(), 1);
+  assert.deepEqual(fixture.getExecutedTargets(), [{ tabId: 9, documentIds: ["document-course"] }]);
+  fixture.navigate("https://attacker.example.test/video");
+  fixture.runDelayedVerification();
+
+  assert.equal(fixture.getInjectionCount(), 1);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "SDK_CONTEXT_CHANGED");
+  assert.equal(result.mediaCount, 0);
+  assert.deepEqual(Array.from(result.frameResults), []);
+});
+
+test("SDK 视频注入执行期间发生跨来源跳转时不会返回新页面状态", () => {
+  const fixture = loadBoundVideoService();
+  let result = null;
+  fixture.navigateDuringNextInjection("https://attacker.example.test/video");
+  fixture.service.controlTab(9, { type: "GET_STATUS" }, (value) => {
+    result = value;
+  }, {
+    origin: "https://course.example.test",
+    originPattern: "https://course.example.test/*"
+  });
+
+  assert.equal(fixture.getInjectionCount(), 1);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "SDK_CONTEXT_CHANGED");
+  assert.equal(result.mediaCount, 0);
+  assert.deepEqual(Array.from(result.frameResults), []);
+});
+
+test("SDK 视频在浏览器不支持 documentId 绑定时安全失败", () => {
+  const fixture = loadBoundVideoService();
+  let result = null;
+  fixture.disableDocumentBinding();
+  fixture.service.controlTab(9, { type: "GET_STATUS" }, (value) => {
+    result = value;
+  }, {
+    origin: "https://course.example.test",
+    originPattern: "https://course.example.test/*"
+  });
+
+  assert.equal(fixture.getInjectionCount(), 0);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "SDK_CONTEXT_CHANGED");
 });
 
 test("VideoService 使用实际含视频的 iframe 状态并延迟确认强控", () => {
@@ -245,10 +461,10 @@ test("倍速强控可阻止原生 setter 绕过并按需逐帧恢复", () => {
   assert.match(source, /videoJsDomTime\(null, "\.vjs-current-time-display"\)/);
   assert.match(source, /durationSource = "videojs-dom"/);
   assert.match(source, /durationSource:\s*info\.durationSource/);
-  assert.match(source, /WinSpeedBallMediaCoreV6/);
+  assert.match(source, /WinSpeedBallMediaCoreV7/);
   assert.match(source, /function resumeAfterRateChange\(media\)/);
   assert.match(source, /function resumeAfterRateChange\(media\)[\s\S]*?playMedia\(target\);[\s\S]*?\[120, 600, 1200\]\.forEach/);
-  assert.match(source, /SESSION_STATE_KEY = "__winspeedball_media_state_v6"/);
+  assert.match(source, /var SESSION_STATE_KEY = "[^"]+"/);
   assert.match(source, /function restoreContinuousState\(\)/);
   assert.match(source, /function persistContinuousState\(\)/);
   assert.match(source, /\["loadstart", "loadedmetadata", "loadeddata", "canplay"/);
@@ -257,7 +473,37 @@ test("倍速强控可阻止原生 setter 绕过并按需逐帧恢复", () => {
   const setRateBlock = source.slice(source.indexOf('case "SET_RATE":'), source.indexOf('case "STEP_UP":'));
   assert.doesNotMatch(setRateBlock, /continuousPlayback = true|resumeAfterRateChange/);
   assert.match(source, /case "ENABLE_AUTOPLAY":[\s\S]*?state\.continuousPlayback = true[\s\S]*?resumeAfterRateChange\(media\)/);
-  assert.match(source, /case "STOP_LOCK":[\s\S]*?state\.rateLocked = false[\s\S]*?stopRateDefense\(\)/);
+  assert.match(source, /case "ENABLE_RATE_LOCK":[\s\S]*?state\.rateLocked = true[\s\S]*?startRateDefense\(5000\)/);
+  assert.match(source, /case "RESET":[\s\S]*?state\.rate = 1[\s\S]*?state\.volume = 0\.8[\s\S]*?state\.muted = false[\s\S]*?state\.rateLocked = false/);
+  assert.match(source, /case "DISABLE_RATE_LOCK":[\s\S]*?state\.lockRequested = false[\s\S]*?state\.rateLocked = false[\s\S]*?state\.controlMode = state\.continuousPlayback \? "apply" : "stopped"[\s\S]*?stopRateDefense\(\)/);
+});
+
+test("V7 倍速锁开关不会关闭已启用的自动续播", () => {
+  const runtime = loadMainMediaCore();
+  assert.ok(runtime.api);
+  assert.match(runtime.api.version, /main-media-core-v7$/);
+
+  const autoplay = runtime.api.handleCommand({ type: "ENABLE_AUTOPLAY" });
+  assert.equal(autoplay.continuousPlayback, true);
+  assert.equal(autoplay.rateLocked, false);
+
+  const enabled = runtime.api.handleCommand({ type: "ENABLE_RATE_LOCK" });
+  assert.equal(enabled.rateLocked, true);
+  assert.equal(enabled.continuousPlayback, true);
+  assert.equal(runtime.api.getDebugState().continuousPlayback, true);
+
+  const disabled = runtime.api.handleCommand({ type: "DISABLE_RATE_LOCK" });
+  assert.equal(disabled.rateLocked, false);
+  assert.equal(disabled.continuousPlayback, true);
+  assert.equal(disabled.controlMode, "apply");
+  assert.equal(runtime.api.getDebugState().continuousPlayback, true);
+
+  const persisted = JSON.parse(Array.from(runtime.sessionValues.values())[0]);
+  assert.deepEqual(persisted, {
+    rate: 1,
+    rateLocked: false,
+    continuousPlayback: true
+  });
 });
 
 test("视频控制会发现跨域播放器并注册页面早期强控", () => {
@@ -290,7 +536,6 @@ test("一次应用命令不再隐式启动锁定定时器", () => {
     assert.equal(block.includes("startLock()"), false, command);
     assert.equal(block.includes("markApplied()"), true, command);
   }
-  assert.match(source, /case "LOCK_STATE":[\s\S]*?startLock\(true\)/);
   assert.match(source, /function stopLock\(\)[\s\S]*?clearInterval\(lockTimer\)/);
   assert.equal((source.match(/setInterval\(/g) || []).length, 1);
 });
@@ -304,7 +549,7 @@ test("消息 Schema 支持显式锁定、停止、媒体列表、播放和暂停
   vm.runInContext(fs.readFileSync(path.join(root, "background/message-schema.js"), "utf8"), context);
   const schema = context.self.WinSpeedBallMessageSchema;
   const sender = { id: "extension-id", url: "chrome-extension://extension-id/popup/index.html" };
-  for (const type of ["LOCK_STATE", "STOP_LOCK", "GET_MEDIA_LIST", "PLAY", "PAUSE"]) {
+  for (const type of ["ENABLE_RATE_LOCK", "DISABLE_RATE_LOCK", "GET_MEDIA_LIST", "PLAY", "PAUSE"]) {
     const parsed = schema.parse({ version: 1, action: "controlActiveTab", source: "popup", requestId: `video-${type}`, payload: { command: { type } } }, sender);
     assert.equal(parsed.ok, true, type);
   }
@@ -365,7 +610,7 @@ test("显式暂停只控制当前媒体，并且不会被自动续播恢复", as
 
   runtime.media[0].pause();
   const playCallsBeforeStop = runtime.media[0].playCalls;
-  const stopped = runtime.api.handleCommand({ type: "STOP_LOCK" });
+  const stopped = runtime.api.handleCommand({ type: "DISABLE_AUTOPLAY" });
   runtime.runTimeouts();
   assert.equal(stopped.keepPlaying, false);
   assert.equal(stopped.controlMode, "stopped");
@@ -420,13 +665,14 @@ test("VideoService 对 video.read 媒体模型执行字段白名单过滤", () =
 });
 
 test("关闭自动续播不会关闭用户显式开启的速度锁定", () => {
-  const runtime = loadContentScript([{ paused: true, duration: 120, currentTime: 0 }]);
-  const locked = runtime.api.handleCommand({ type: "LOCK_STATE" });
-  assert.equal(locked.controlMode, "lock");
+  const runtime = loadMainMediaCore();
+  const locked = runtime.api.handleCommand({ type: "ENABLE_RATE_LOCK" });
+  assert.equal(locked.rateLocked, true);
   runtime.api.handleCommand({ type: "ENABLE_AUTOPLAY" });
   const disabled = runtime.api.handleCommand({ type: "DISABLE_AUTOPLAY" });
-  assert.equal(disabled.controlMode, "lock");
-  assert.equal(disabled.keepPlaying, false);
-  const stopped = runtime.api.handleCommand({ type: "STOP_LOCK" });
-  assert.equal(stopped.controlMode, "stopped");
+  assert.equal(disabled.rateLocked, true);
+  assert.equal(disabled.continuousPlayback, false);
+  const unlocked = runtime.api.handleCommand({ type: "DISABLE_RATE_LOCK" });
+  assert.equal(unlocked.rateLocked, false);
+  assert.equal(unlocked.controlMode, "stopped");
 });

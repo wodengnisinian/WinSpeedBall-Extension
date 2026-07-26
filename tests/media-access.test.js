@@ -22,7 +22,9 @@ function createFixture(permissionGranted, frameUrl = "https://media.cdn.test/emb
         getAllFrames(options, callback) {
           callback([
             { frameId: 0, parentFrameId: -1, url: "https://mooc1.chaoxing.com/mycourse/studentstudy" },
-            { frameId: 7, parentFrameId: 0, url: frameUrl }
+            { frameId: 7, parentFrameId: 0, url: frameUrl },
+            { frameId: 8, parentFrameId: 0, url: "https://ads.example.test/banner" },
+            { frameId: 9, parentFrameId: 0, url: "https://login.example.test/authorize" }
           ]);
         }
       },
@@ -81,19 +83,19 @@ test("图书授权同时包含学习通课程页和内嵌阅读器来源", async
     granted: false,
     tabId: 9,
     originPattern: "https://mooc1.chaoxing.com/*"
-  });
+  }, "chaoxing");
 
   assert.equal(result.ok, true);
   assert.equal(result.frameAccessGranted, true);
   assert.deepEqual(JSON.parse(JSON.stringify(fixture.requested[0].origins)), [
     "https://mooc1.chaoxing.com/*",
-    "*://*.chaoxing.com/*",
-    "*://*.sslibrary.com/*"
+    "https://resapi.chaoxing.com/*"
   ]);
   assert.deepEqual(JSON.parse(JSON.stringify(result.bookFrameOrigins)), [
-    "*://*.chaoxing.com/*",
-    "*://*.sslibrary.com/*"
+    "https://resapi.chaoxing.com/*"
   ]);
+  assert.equal(fixture.requested[0].origins.includes("https://ads.example.test/*"), false);
+  assert.equal(fixture.requested[0].origins.includes("https://login.example.test/*"), false);
   assert.equal(result.preloadRegistered, true);
   assert.equal(fixture.registered.length, 1);
   assert.equal(fixture.registered[0].id, "winspeedball-book-preload");
@@ -102,4 +104,19 @@ test("图书授权同时包含学习通课程页和内嵌阅读器来源", async
   assert.equal(fixture.registered[0].world, "MAIN");
   assert.equal(fixture.registered[0].matchOriginAsFallback, true);
   assert.deepEqual(JSON.parse(JSON.stringify(fixture.registered[0].js)), ["content/book-core-main.js"]);
+});
+
+test("普通图书和图片模式不会申请学习通框架权限", async () => {
+  const fixture = createFixture(true, "https://resapi.chaoxing.com/realReadNew?gcebook=1");
+  const result = await fixture.api.ensureBookAccess({
+    ok: true,
+    granted: false,
+    tabId: 9,
+    originPattern: "https://mooc1.chaoxing.com/*"
+  }, "book");
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /普通图书和图片模式不会读取学习通内容/);
+  assert.equal(fixture.requested.length, 0);
+  assert.equal(fixture.registered.length, 0);
 });

@@ -51,17 +51,31 @@ test("工作区严格拒绝错误 runId、协议版本和额外协议字段", ()
 
 test("parent.postMessage 兼容调用只通过工作区受控 facade 转发", () => {
   assert.match(workspace, /Object\.freeze\(\{ postMessage:\s*forwardLegacyPostMessage \}\)/);
-  assert.match(workspace, /new Function\("window", "parent", "top", "self", "globalThis"/);
+  assert.match(workspace, /new Function\([\s\S]*"window", "parent", "top", "self", "globalThis"/);
   assert.match(workspace, /message\.source\s*!==\s*"DouyinPanelScript"/);
   assert.match(workspace, /sendWorkspaceMessage\("BRIDGE_REQUEST"/);
   assert.doesNotMatch(workspace, /window\.parent\.postMessage\(/);
+});
+
+test("工作区只接收已确认的权限集合，并对未授权联网应用 CSP 与 API 双重边界", () => {
+  assert.match(popup, /permissions\.indexOf\("dom"\)\s*<\s*0/);
+  assert.match(popup, /function addDomPermissionDeclaration\(code\)/);
+  assert.match(popup, /savedScript\.code\s*=\s*addDomPermissionDeclaration\(savedScript\.code\)/);
+  assert.match(popup, /confirmedPermissions[\s\S]*permissionConfirmed\s*===\s*true[\s\S]*permissionSignature\s*===\s*declaredSignature/);
+  assert.match(popup, /postToScriptWorkspace\("RUN_SCRIPT_UI",\s*\{[\s\S]*permissions:\s*confirmedPermissions/);
+  assert.match(workspace, /normalizeWorkspacePermissions\(data\.payload\.permissions\)/);
+  assert.match(workspace, /workspacePermissions\.indexOf\("dom"\)\s*<\s*0/);
+  assert.match(workspace, /connect-src 'none'/);
+  assert.match(workspace, /NETWORK_GLOBALS/);
+  assert.match(workspace, /if \(networkAllowed\)\s*\{[\s\S]*window\.GM_xmlhttpRequest/);
+  assert.match(workspace, /if \(!hasWorkspacePermission\("automation"\)\) return;/);
 });
 
 test("START、NEXT、SET_INTERVAL 必须声明并确认 automation 权限", () => {
   const gate = popup.indexOf("if (!scriptWorkspaceAutomationAllowed)");
   const confirm = popup.indexOf("douyinBridgeDecision = window.confirm", gate);
   assert.ok(gate >= 0 && confirm > gate, "权限门应先于额外风险确认");
-  assert.match(popup, /parsedMeta\.permissions\.indexOf\("automation"\)\s*>=\s*0/);
+  assert.match(popup, /confirmedPermissions\.indexOf\("automation"\)\s*>=\s*0/);
   assert.match(popup, /script\.permissionConfirmed\s*===\s*true/);
   assert.match(popup, /script\.permissionSignature\s*===\s*declaredSignature/);
   assert.match(popup, /\["START",\s*"NEXT",\s*"SET_INTERVAL"\]/);
@@ -83,6 +97,8 @@ test("消息 schema 接受已确认 automation，拒绝未知权限和未确认�
     }
   };
   assert.equal(schema.parse(base, sender).ok, true);
+  assert.equal(schema.parse({ ...base, payload: { ...base.payload, permissions: ["network"] } }, sender).ok, false);
+  assert.equal(schema.parse({ ...base, payload: { ...base.payload, permissions: ["dom", "dom"] } }, sender).ok, false);
   assert.equal(schema.parse({ ...base, payload: { ...base.payload, permissions: ["internal"] } }, sender).ok, false);
   assert.equal(schema.parse({ ...base, payload: { ...base.payload, permissionConfirmed: false } }, sender).ok, false);
 });

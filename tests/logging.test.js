@@ -110,7 +110,7 @@ test("日志面板提供运行日志、更新日志以及完整操作", () => {
   assert.match(popupHtml, /v3\.6\.0 · 脚本与公开接口/);
   assert.match(popupHtml, /v3\.6\.0 · 日志与诊断/);
   assert.match(popupHtml, /v3\.6\.0 · AI、OCR 与基础能力/);
-  assert.match(popupSource, /function selectLogView\(view\)/);
+  assert.match(popupSource, /function selectLogView\(view, remember\)/);
   assert.match(popupHtml, /id="logList"[^>]*tabindex="0"/);
   assert.match(popupSource, /logList\.addEventListener\("wheel"/);
   assert.match(popupSource, /logList\.addEventListener\("keydown"/);

@@ -72,7 +72,7 @@
       voiceJobProgress: 0,
       voiceJobError: message
     }, extraState || {})).then(function () {
-      storage.appendLog("语音", "网页语音获取失败", { 原因: message }, "error");
+      storage.appendLog("语音", "语音问题获取失败", { 原因: message }, "error");
       return { ok: false, error: message, needsToolbarPopup: !!(extraState && extraState.voiceNeedsToolbarPopup) };
     });
   }
@@ -88,7 +88,7 @@
     activeJobId = jobId;
     function requireActiveJob(value) {
       if (activeJobId === jobId) return value;
-      var error = new Error("网页语音获取已取消。");
+      var error = new Error("语音问题获取已取消。");
       error.voiceCancelled = true;
       throw error;
     }
@@ -130,7 +130,7 @@
       if (error && error.voiceCancelled) return { ok: true, jobId: jobId, status: "cancelled" };
       activeJobId = "";
       if (isActiveTabInvocationError(error)) {
-        return fail(new Error("Edge 安全限制：请先切换到播放语音的网页，点击工具栏中的 WinSpeedBall 图标，再从“网页语音”点击“开始录音”。"), { voiceNeedsToolbarPopup: true });
+        return fail(new Error("Edge 安全限制：请先切换到播放语音的网页，点击工具栏中的 WinSpeedBall 图标，再从“语音问题”点击“开始录音”。"), { voiceNeedsToolbarPopup: true });
       }
       return fail(error);
     });

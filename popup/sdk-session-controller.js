@@ -9,6 +9,8 @@
     var contracts = options.contracts;
     var protocol = options.protocol;
     var ensureSiteAccess = options.ensureSiteAccess;
+    var ensureMediaAccess = options.ensureMediaAccess;
+    var ensureBookAccess = options.ensureBookAccess;
     var confirmAction = options.confirmAction;
     var runtimeUrl = options.runtimeUrl;
     var iframe = null;
@@ -31,8 +33,34 @@
 
     function requiresSite(capabilities) {
       return capabilities.some(function (capability) {
-        return capability === "video.read" || capability === "video.control" || capability === "page.read" || capability === "book.read" || capability === "ocr.read";
+        return capability === "video.read" || capability === "video.control" || capability === "page.read" || capability === "book.read" || capability === "book.control" || capability === "ocr.read";
       });
+    }
+
+    function hasCapabilityPrefix(capabilities, prefix) {
+      return capabilities.some(function (capability) {
+        return String(capability || "").indexOf(prefix) === 0;
+      });
+    }
+
+    function selectedBookAccessMode() {
+      var field = byId("developerBookAccessMode");
+      var value = String(field && field.value || "book");
+      return ["book", "image", "chaoxing"].indexOf(value) >= 0 ? value : "book";
+    }
+
+    function authorizeSite(context, capabilities) {
+      if (!requiresSite(capabilities)) return Promise.resolve(context);
+      if (hasCapabilityPrefix(capabilities, "book.") && typeof ensureBookAccess === "function") {
+        return ensureBookAccess(context, context.bookMode).then(function (site) {
+          if (!site || !site.ok || !hasCapabilityPrefix(capabilities, "video.") || typeof ensureMediaAccess !== "function") return site;
+          return ensureMediaAccess(site);
+        });
+      }
+      if (hasCapabilityPrefix(capabilities, "video.") && typeof ensureMediaAccess === "function") {
+        return ensureMediaAccess(context);
+      }
+      return ensureSiteAccess(context);
     }
 
     function post(type, payload) {
@@ -70,8 +98,23 @@
       session = null;
       destroySandbox();
       resetSessionButtons();
-      if (!current || !current.sessionToken) return Promise.resolve();
-      return sendMessage({ action: "closeSdkSession", payload: { sessionToken: current.sessionToken } }).catch(function () {});
+      if (!current || !current.sessionToken) return Promise.resolve({ ok: true, revoked: false });
+      return sendMessage({ action: "closeSdkSession", payload: { sessionToken: current.sessionToken } }).then(function (result) {
+        if (!result || result.ok === false) {
+          session = current;
+          resetSessionButtons();
+          return result || { ok: false, code: "SDK_SESSION_CLOSE_FAILED", error: "SDK 会话清理没有返回结果。" };
+        }
+        return result;
+      }, function (error) {
+        session = current;
+        resetSessionButtons();
+        return {
+          ok: false,
+          code: "SDK_SESSION_CLOSE_FAILED",
+          error: error && error.message || String(error)
+        };
+      });
     }
 
     function sendRpcResult(message, result) {
@@ -96,7 +139,7 @@
         return;
       }
       if (message.type === "STARTED") {
-        status("SDK 脚本正在沙箱 Worker 中运行。会话到期时间：" + new Date(session.expiresAt).toLocaleTimeString());
+        status("SDK 脚本正在沙箱 Worker 中运行。会话不会按时间到期，可通过“停止会话”主动结束。");
         return;
       }
       if (message.type === "SDK_REQUEST") {
@@ -158,22 +201,30 @@
       status("正在校验 SDK 草稿...");
       return ensureDraftSaved().then(function (draft) {
         status("正在锁定 SDK 运行页面...");
-        return sendMessage({ action: "prepareSdkContext", payload: { capabilities: draft.capabilities } }).then(function (context) {
+        var bookMode = hasCapabilityPrefix(draft.capabilities, "book.") ? selectedBookAccessMode() : "";
+        var contextPayload = { capabilities: draft.capabilities };
+        if (bookMode) contextPayload.bookMode = bookMode;
+        return sendMessage({ action: "prepareSdkContext", payload: contextPayload }).then(function (context) {
           if (!context || !context.ok) throw Object.assign(new Error(context && context.error || "无法锁定 SDK 运行页面。"), { code: context && context.code || "SDK_CONTEXT_UNAVAILABLE" });
           var targetLabel = context.tabId == null ? "本地开发者上下文" : context.origin;
-          if (!confirmAction("脚本请求以下能力：\n" + draft.capabilities.join("\n") + "\n\n运行范围：" + targetLabel + "\n授权与代码、网站和 SDK 版本绑定。确定启动吗？")) {
+          var bookModeLabel = { book: "普通图书", image: "图片序列", chaoxing: "学习通图像书" }[context.bookMode] || "";
+          var bookModeLine = bookModeLabel ? "\n图书接口模式：" + bookModeLabel : "";
+          var bindingLabel = bookModeLabel ? "代码、网站、图书模式和 SDK 版本" : "代码、网站和 SDK 版本";
+          if (!confirmAction("脚本请求以下能力：\n" + draft.capabilities.join("\n") + "\n\n运行范围：" + targetLabel + bookModeLine + "\n授权与" + bindingLabel + "绑定。确定启动吗？")) {
             throw Object.assign(new Error("用户取消了 SDK 授权。"), { code: "SDK_GRANT_CANCELLED" });
           }
-          var access = requiresSite(draft.capabilities) ? ensureSiteAccess(context) : Promise.resolve(context);
+          var access = authorizeSite(context, draft.capabilities);
           return access.then(function (site) {
           if (!site || !site.ok) throw Object.assign(new Error(site && site.error || "当前网页未授权。"), { code: "SDK_ORIGIN_NOT_ALLOWED" });
           status("正在创建受控 SDK 会话...");
-          return sendMessage({ action: "prepareSdkSession", payload: { scriptId: draft.id, code: draft.code, capabilities: draft.capabilities, contextNonce: context.contextNonce, confirmed: true } }).then(function (created) {
+          var sessionPayload = { scriptId: draft.id, code: draft.code, capabilities: draft.capabilities, contextNonce: context.contextNonce, confirmed: true };
+          if (context.bookMode) sessionPayload.bookMode = context.bookMode;
+          return sendMessage({ action: "prepareSdkSession", payload: sessionPayload }).then(function (created) {
             if (!created || !created.ok) throw Object.assign(new Error(created && created.error || "SDK 会话创建失败。"), { code: created && created.code || "SDK_SESSION_CREATE_FAILED" });
             session = Object.assign({}, created, { code: draft.code });
             return connectSandbox().then(function () {
               runId = randomId("run_");
-              post("RUN", { runId: runId, scriptId: draft.id, code: draft.code, timeoutMs: 5000 });
+              post("RUN", { runId: runId, scriptId: draft.id, code: draft.code, bookMode: created.bookMode || "", timeoutMs: 0 });
               byId("startDeveloperSessionBtn").disabled = true;
               byId("stopDeveloperSessionBtn").disabled = false;
               return { ok: true, session: session };
@@ -183,7 +234,12 @@
         });
       }).catch(function (error) {
         var failure = { ok: false, code: error.code || "SDK_SESSION_CREATE_FAILED", error: error.message || String(error) };
-        return revokeCreatedSession().then(function () {
+        return revokeCreatedSession().then(function (cleanup) {
+          if (cleanup && cleanup.ok === false) {
+            failure.cleanupError = cleanup.error || "SDK 会话清理失败。";
+            status("SDK 会话启动失败：" + failure.error + "；后台会话清理失败，请点击“停止会话”重试。");
+            return failure;
+          }
           status("SDK 会话启动失败：" + failure.error);
           return failure;
         });

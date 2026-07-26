@@ -5,13 +5,28 @@
   function invalid(error) { return { ok: false, code: "SDK_INVALID_ARGUMENT", error: error }; }
   function noArgs(args) { return args.length === 0 ? ok() : invalid("This SDK method does not accept arguments."); }
   function text(value, max, name) { return typeof value === "string" && value.trim() && value.length <= max ? ok() : invalid(name + " is invalid."); }
+  function bookMode(value) { return ["book", "image", "chaoxing"].indexOf(value) >= 0; }
+  function validBookInterval(value, mode) {
+    return Number.isFinite(value) && value >= (mode === "chaoxing" ? 2 : 30) && value <= 240;
+  }
 
   function validate(method, args) {
     if (!Array.isArray(args)) return invalid("SDK arguments must be an array.");
-    if (["video.getAll", "video.current", "video.getStatus", "video.play", "video.pause", "ocr.latest", "ocr.capture", "qa.latest", "qa.ocr", "qa.voice", "ai.latest", "page.info", "page.text", "page.title", "page.url", "book.getStatus"].indexOf(method) >= 0) return noArgs(args);
+    if (["video.getAll", "video.current", "video.getStatus", "video.play", "video.pause", "video.reset", "ocr.latest", "ocr.capture", "qa.latest", "qa.ocr", "qa.voice", "ai.latest", "page.info", "page.text", "page.title", "page.url", "book.stopAuto"].indexOf(method) >= 0) return noArgs(args);
     if (method === "video.setRate") return args.length === 1 && Number.isFinite(args[0]) && args[0] >= 0.25 && args[0] <= 16 ? ok() : invalid("Playback rate must be between 0.25 and 16.");
     if (method === "video.setVolume") return args.length === 1 && Number.isFinite(args[0]) && args[0] >= 0 && args[0] <= 1 ? ok() : invalid("Volume must be between 0 and 1.");
     if (method === "video.mute") return args.length === 1 && typeof args[0] === "boolean" ? ok() : invalid("Muted state must be a boolean.");
+    if (method === "video.setAutoplay" || method === "video.setRateLock") return args.length === 1 && typeof args[0] === "boolean" ? ok() : invalid("Video toggle state must be a boolean.");
+    if (method === "book.getStatus") return args.length === 0 || (args.length === 1 && bookMode(args[0])) ? ok() : invalid("Book status mode is invalid.");
+    if (method === "book.turnPrev" || method === "book.turnNext") return args.length === 1 && bookMode(args[0]) ? ok() : invalid("Book turn mode is invalid.");
+    if (method === "book.startAuto") {
+      var options = args[0];
+      if (args.length !== 1 || !options || typeof options !== "object" || Array.isArray(options)) return invalid("Book start options are invalid.");
+      var optionKeys = Object.keys(options);
+      if (optionKeys.length !== 2 || optionKeys.some(function (key) { return ["mode", "intervalSeconds"].indexOf(key) < 0; })) return invalid("Book start options are invalid.");
+      return bookMode(options.mode) && validBookInterval(options.intervalSeconds, options.mode) ? ok() : invalid("Book start mode or interval is invalid.");
+    }
+    if (method === "book.setInterval") return args.length === 2 && bookMode(args[1]) && validBookInterval(args[0], args[1]) ? ok() : invalid("Book interval is invalid.");
     if (method === "ocr.recognize") {
       var input = args[0];
       if (args.length !== 1 || !input || typeof input !== "object" || Array.isArray(input)) return invalid("OCR input must be an object.");

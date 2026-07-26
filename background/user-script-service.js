@@ -4,6 +4,7 @@
   var REGISTERED_PREFIX = "wsb-user-";
   var WORLD_PREFIX = "wsb_world_";
   var MAX_CODE_LENGTH = 200000;
+  var ALLOWED_PERMISSIONS = ["dom", "network", "automation"];
   var syncQueue = Promise.resolve();
 
   function disabledError() {
@@ -39,16 +40,28 @@
     return REGISTERED_PREFIX + safePart(script && script.id);
   }
 
-  function worldId(scriptId) {
-    return WORLD_PREFIX + safePart(scriptId);
+  function worldBoundary(code, permissions) {
+    var normalized = normalizePermissions(permissions) || [];
+    return {
+      network: normalized.indexOf("network") >= 0,
+      messaging: declaredCapabilities(code).indexOf("video.read") >= 0
+    };
   }
 
-  function prepareWorld(scriptId) {
-    return chrome.userScripts.configureWorld({
-      worldId: worldId(scriptId),
-      messaging: true,
-      csp: "script-src 'self'; object-src 'none'"
-    });
+  function worldId(scriptId, code, permissions) {
+    var boundary = worldBoundary(code, permissions);
+    return WORLD_PREFIX + safePart(scriptId) +
+      "_n" + (boundary.network ? "1" : "0") +
+      "_m" + (boundary.messaging ? "1" : "0") +
+      "_c" + hashPart(code, 2166136261) + hashPart(code, 2654435769);
+  }
+
+  function registeredWorldId(registration) {
+    if (registration && typeof registration.worldId === "string" && registration.worldId) {
+      return registration.worldId;
+    }
+    var suffix = String(registration && registration.id || "").slice(REGISTERED_PREFIX.length);
+    return suffix ? WORLD_PREFIX + suffix : "";
   }
 
   function declaredCapabilities(code) {
@@ -60,6 +73,69 @@
       if (capability && capabilities.indexOf(capability) < 0) capabilities.push(capability);
     });
     return capabilities;
+  }
+
+  function declaredPermissions(code) {
+    var permissions = [];
+    String(code || "").split(/\r?\n/).forEach(function (line) {
+      var match = line.match(/^\s*\/\/\s*@permission\s+([^\s]+)\s*$/i);
+      if (!match) return;
+      var permission = String(match[1] || "").trim().toLowerCase();
+      if (permission && permissions.indexOf(permission) < 0) permissions.push(permission);
+    });
+    return permissions;
+  }
+
+  function normalizePermissions(value) {
+    if (!Array.isArray(value) || !value.length) return null;
+    var permissions = [];
+    for (var index = 0; index < value.length; index += 1) {
+      if (typeof value[index] !== "string") return null;
+      var permission = value[index].trim().toLowerCase();
+      if (!permission || ALLOWED_PERMISSIONS.indexOf(permission) < 0 || permissions.indexOf(permission) >= 0) return null;
+      permissions.push(permission);
+    }
+    if (permissions.indexOf("dom") < 0) return null;
+    return permissions.sort();
+  }
+
+  function permissionSignature(value) {
+    var permissions = normalizePermissions(value);
+    return permissions ? permissions.join(",") : "";
+  }
+
+  function matchesDeclaredPermissions(code, permissions) {
+    var storedSignature = permissionSignature(permissions);
+    var declaredSignature = permissionSignature(declaredPermissions(code));
+    return !!storedSignature && storedSignature === declaredSignature;
+  }
+
+  function permissionError() {
+    var error = new Error("普通用户脚本必须声明 dom 基础权限，且只能按需叠加 network 或 automation。");
+    error.code = "USER_SCRIPT_PERMISSION_INVALID";
+    return error;
+  }
+
+  function prepareWorld(scriptId, code, permissions) {
+    var normalized = normalizePermissions(permissions);
+    if (!normalized || !matchesDeclaredPermissions(code, normalized)) return Promise.reject(permissionError());
+    var boundary = worldBoundary(code, normalized);
+    return chrome.userScripts.configureWorld({
+      worldId: worldId(scriptId, code, normalized),
+      messaging: boundary.messaging,
+      csp: "script-src 'self'; object-src 'none'; connect-src " +
+        (boundary.network ? "http: https: ws: wss:" : "'none'")
+    });
+  }
+
+  function lockRegisteredWorld(registration) {
+    var oldWorldId = registeredWorldId(registration);
+    if (!oldWorldId) return Promise.resolve();
+    return chrome.userScripts.configureWorld({
+      worldId: oldWorldId,
+      messaging: false,
+      csp: "script-src 'self'; object-src 'none'; connect-src 'none'"
+    });
   }
 
   function publicWsbFacade(code) {
@@ -99,7 +175,18 @@
 
   function validStoredScript(script) {
     var permissions = script && script.meta && script.meta.permissions;
-    return !!script && script.enabled !== false && script.permissionConfirmed === true && typeof script.code === "string" && script.code.length > 0 && script.code.length <= MAX_CODE_LENGTH && Array.isArray(script.grantedOrigins) && script.grantedOrigins.length > 0 && Array.isArray(permissions) && permissions.length > 0;
+    var signature = permissionSignature(permissions);
+    return !!script &&
+      script.enabled !== false &&
+      script.permissionConfirmed === true &&
+      typeof script.code === "string" &&
+      script.code.length > 0 &&
+      script.code.length <= MAX_CODE_LENGTH &&
+      Array.isArray(script.grantedOrigins) &&
+      script.grantedOrigins.length > 0 &&
+      !!signature &&
+      script.permissionSignature === signature &&
+      matchesDeclaredPermissions(script.code, permissions);
   }
 
   function buildRegistration(script) {
@@ -110,21 +197,36 @@
       allFrames: true,
       runAt: normalizeRunAt(script.meta && script.meta.runAt),
       world: "USER_SCRIPT",
-      worldId: worldId(script.id)
+      worldId: worldId(script.id, script.code, script.meta.permissions)
     };
   }
 
   function syncNow(scripts) {
     scripts = Array.isArray(scripts) ? scripts : [];
     return ensureAvailable().then(function (registered) {
-      var existingIds = new Set((registered || []).map(function (script) { return script.id; }).filter(function (id) { return id.indexOf(REGISTERED_PREFIX) === 0; }));
+      var existing = new Map((registered || []).filter(function (script) {
+        return script && typeof script.id === "string" && script.id.indexOf(REGISTERED_PREFIX) === 0;
+      }).map(function (script) {
+        return [script.id, script];
+      }));
+      var existingIds = new Set(existing.keys());
       var eligible = scripts.filter(validStoredScript);
       var desired = eligible.map(buildRegistration);
       var desiredIds = new Set(desired.map(function (script) { return script.id; }));
       var removeIds = Array.from(existingIds).filter(function (id) { return !desiredIds.has(id); });
       var updateScripts = desired.filter(function (script) { return existingIds.has(script.id); });
       var newScripts = desired.filter(function (script) { return !existingIds.has(script.id); });
-      return Promise.all(eligible.map(function (script) { return prepareWorld(script.id); })).then(function () {
+      var removedRegistrations = removeIds.map(function (id) { return existing.get(id); });
+      var replacedWorlds = updateScripts.map(function (script) {
+        return existing.get(script.id);
+      }).filter(function (oldRegistration, index) {
+        return registeredWorldId(oldRegistration) !== updateScripts[index].worldId;
+      });
+      return Promise.all(
+        eligible.map(function (script) {
+          return prepareWorld(script.id, script.code, script.meta.permissions);
+        }).concat(removedRegistrations.map(lockRegisteredWorld))
+      ).then(function () {
         return removeIds.length ? chrome.userScripts.unregister({ ids: removeIds }) : undefined;
       }).then(function () {
         if (!updateScripts.length) return;
@@ -133,6 +235,8 @@
           return chrome.userScripts.register(updateScripts);
         });
       }).then(function () {
+        return Promise.all(replacedWorlds.map(lockRegisteredWorld));
+      }).then(function () {
         return newScripts.length ? chrome.userScripts.register(newScripts) : undefined;
       }).then(function () {
         return { available: true, registered: eligible.length };
@@ -140,30 +244,43 @@
     });
   }
 
-  function sync(scripts) {
-    var snapshot = JSON.parse(JSON.stringify(Array.isArray(scripts) ? scripts : []));
-    var result = syncQueue.then(function () { return syncNow(snapshot); }, function () { return syncNow(snapshot); });
+  function enqueue(task) {
+    var result = syncQueue.then(task, task);
     syncQueue = result.then(function () {}, function () {});
     return result;
   }
 
-  function execute(scriptId, code, tabId) {
+  function sync(scripts) {
+    var snapshot = JSON.parse(JSON.stringify(Array.isArray(scripts) ? scripts : []));
+    return enqueue(function () { return syncNow(snapshot); });
+  }
+
+  function executeNow(scriptId, code, permissions, tabId) {
     code = String(code || "");
     if (!code.trim() || code.length > MAX_CODE_LENGTH) return Promise.reject(new Error("脚本为空或超过大小限制。"));
+    if (!matchesDeclaredPermissions(code, permissions)) return Promise.reject(permissionError());
     return ensureAvailable().then(function () {
-      return prepareWorld(scriptId);
+      return prepareWorld(scriptId, code, permissions);
     }).then(function () {
       return chrome.userScripts.execute({
         target: { tabId: tabId, allFrames: false },
         js: [{ code: wrapCode(code, {}, false) }],
         world: "USER_SCRIPT",
-        worldId: worldId(scriptId),
+        worldId: worldId(scriptId, code, permissions),
         injectImmediately: true
       });
     }).then(function (results) {
       var failed = (results || []).find(function (result) { return result && result.error; });
       if (failed) throw new Error(failed.error);
       return { ok: true };
+    });
+  }
+
+  function execute(scriptId, code, permissions, tabId) {
+    var codeSnapshot = String(code || "");
+    var permissionSnapshot = Array.isArray(permissions) ? permissions.slice() : permissions;
+    return enqueue(function () {
+      return executeNow(scriptId, codeSnapshot, permissionSnapshot, tabId);
     });
   }
 

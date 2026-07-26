@@ -17,6 +17,7 @@ function buildPrivacyService() {
     aiQuestionHistoryByProvider: { deepseek: [{ id: 1 }], openai: [{ id: 2 }] },
     aiProviderWorkspaces: { deepseek: { mode: "custom", question: "q", answer: "a" } },
     aiSelectedProvider: "deepseek",
+    aiTeachingSession: { problem: "teaching question", step: 2, phase: "active" },
     manualAiSourceTime: 100,
     manualAiPrompt: "prompt",
     manualAiResponse: "answer",
@@ -80,7 +81,7 @@ test("隐私中心统计六类本地数据", async () => {
   assert.equal(result.localOnly, true);
   assert.deepEqual(
     JSON.parse(JSON.stringify(result.categories.map((item) => [item.id, item.count]))),
-    [["screenshots", 1], ["ocr", 1], ["ai", 3], ["logs", 2], ["scripts", 1], ["account", 1]]
+    [["screenshots", 1], ["ocr", 1], ["ai", 4], ["logs", 2], ["scripts", 1], ["account", 1]]
   );
 });
 
@@ -104,6 +105,7 @@ test("分类清理 AI 会删除各 Provider 的工作区和历史", async () => 
   assert.equal(fixture.localData.aiQuestionHistoryByProvider, undefined);
   assert.equal(fixture.localData.aiProviderWorkspaces, undefined);
   assert.equal(fixture.localData.aiSelectedProvider, undefined);
+  assert.equal(fixture.localData.aiTeachingSession, undefined);
   assert.equal(fixture.localData.manualAiResponse, undefined);
 });
 

@@ -9,6 +9,14 @@
     function status() { return utils.call(invoke, "video.getStatus", []); }
     function rate(value) { return utils.call(invoke, "video.setRate", [utils.requireNumber(value, "Playback rate", 0.25, 16)]); }
     function volume(value) { return utils.call(invoke, "video.setVolume", [utils.requireNumber(value, "Volume", 0, 1)]); }
+    function requireToggle(value, name) {
+      if (value == null) value = true;
+      if (typeof value !== "boolean") throw utils.invalid(name + " must be a boolean.");
+      return value;
+    }
+    function auto(enabled) { return utils.call(invoke, "video.setAutoplay", [requireToggle(enabled, "Autoplay state")]); }
+    function lock(enabled) { return utils.call(invoke, "video.setRateLock", [requireToggle(enabled, "Rate lock state")]); }
+    function reset() { return utils.call(invoke, "video.reset", []); }
     return Object.freeze({
       all: all,
       current: current,
@@ -22,10 +30,17 @@
       },
       play: function () { return utils.call(invoke, "video.play", []); },
       pause: function () { return utils.call(invoke, "video.pause", []); },
+      auto: auto,
+      lock: lock,
+      reset: reset,
+      autoplay: auto,
+      rateLock: lock,
       getAll: all,
       getStatus: status,
       setRate: rate,
-      setVolume: volume
+      setVolume: volume,
+      setAutoplay: auto,
+      setRateLock: lock
     });
   }
 

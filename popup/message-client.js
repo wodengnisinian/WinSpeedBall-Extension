@@ -176,8 +176,9 @@
     });
   }
 
-  function discoverBookFrameOrigins(tabId, currentOriginPattern) {
+  function discoverBookFrameOrigins(tabId, currentOriginPattern, mode) {
     return new Promise(function (resolve) {
+      var includeChaoxing = mode === "chaoxing";
       var discoveredUrls = [];
       var hasNavigationFrames = !!(chrome.webNavigation && typeof chrome.webNavigation.getAllFrames === "function");
       var hasDomFrames = !!(chrome.scripting && typeof chrome.scripting.executeScript === "function");
@@ -189,6 +190,20 @@
         if (value && discoveredUrls.indexOf(value) < 0) discoveredUrls.push(value);
       }
 
+      function isRelevantNavigationUrl(value) {
+        value = String(value || "");
+        var normalized = value.toLowerCase();
+        if (!/^https?:\/\//.test(normalized)) return false;
+        var isChaoxingOrigin = /:\/\/(?:[^/]+\.)?chaoxing\.com(?:[/:]|$)/i.test(normalized);
+        var isSsLibraryOrigin = /:\/\/(?:[^/]+\.)?sslibrary\.com(?:[/:]|$)/i.test(normalized);
+        if (!includeChaoxing && isChaoxingOrigin) return false;
+        if (includeChaoxing && (isChaoxingOrigin || isSsLibraryOrigin) &&
+            /(insertbook|innerbook|gcebook|realread|readweb|readsvr|moocread|pdg|jpath|epub|ebook|reader)/i.test(normalized)) {
+          return true;
+        }
+        return /(?:^|[\/._-])(book|ebook|reader|epub|pdg|jpath|readweb|readsvr)(?:[\/._?&#=-]|$)/i.test(normalized);
+      }
+
       function finishPart() {
         pending -= 1;
         if (pending > 0 || finished) return;
@@ -198,9 +213,8 @@
           var pattern = originPatternFromUrl(url);
           if (pattern && pattern !== currentOriginPattern && patterns.indexOf(pattern) < 0) patterns.push(pattern);
         });
-        if (/chaoxing\.com\/\*$/i.test(String(currentOriginPattern || "")) || patterns.some(function (pattern) { return /chaoxing\.com\/\*$/i.test(pattern); })) {
-          patterns = patterns.filter(function (pattern) { return !/(^|\.)chaoxing\.com\/\*$/i.test(pattern); });
-          patterns.unshift("*://*.chaoxing.com/*", "*://*.sslibrary.com/*");
+        if (!includeChaoxing) {
+          patterns = patterns.filter(function (pattern) { return !/chaoxing\.com\/\*$/i.test(pattern); });
         }
         resolve(patterns.slice(0, 40));
       }
@@ -209,7 +223,9 @@
         try {
           chrome.webNavigation.getAllFrames({ tabId: tabId }, function (frames) {
             if (!chrome.runtime.lastError) {
-              (frames || []).forEach(function (frame) { addUrl(frame && frame.url); });
+              (frames || []).forEach(function (frame) {
+                if (isRelevantNavigationUrl(frame && frame.url)) addUrl(frame && frame.url);
+              });
             }
             finishPart();
           });
@@ -220,11 +236,13 @@
         try {
           chrome.scripting.executeScript({
             target: { tabId: tabId, allFrames: true },
-            func: function () {
+            func: function (includeChaoxing) {
               return Array.prototype.slice.call(document.querySelectorAll("iframe,frame")).filter(function (frame) {
-                var rect = frame.getBoundingClientRect ? frame.getBoundingClientRect() : { width: 0, height: 0 };
                 var semantic = [frame.id, frame.className, frame.name, frame.title, frame.src, frame.getAttribute("module"), frame.getAttribute("type"), frame.getAttribute("data")].join(" ");
-                return Math.max(0, rect.width) * Math.max(0, rect.height) >= 12000 || /(book|ebook|reader|read|chapter|course|card|ananas|mooc|chaoxing|\u56fe\u4e66|\u9605\u8bfb)/i.test(semantic);
+                var semanticPattern = includeChaoxing
+                  ? /(book|ebook|reader|readweb|readsvr|realread|insertbook|innerbook|gcebook|pdg|jpath|epub|\u56fe\u4e66|\u9605\u8bfb)/i
+                  : /(book|ebook|reader|readweb|readsvr|realread|gcebook|epub|\u56fe\u4e66|\u9605\u8bfb)/i;
+                return semanticPattern.test(semantic);
               }).reduce(function (urls, frame) {
                 var sources = [String(frame.src || frame.getAttribute("src") || "")];
                 var moduleName = String(frame.getAttribute("module") || "").toLowerCase();
@@ -241,13 +259,14 @@
                     if (pdgUrlMatch) sources.push(pdgUrlMatch[1].replace(/&amp;/g, "&"));
                   }
                 }
-                if (moduleName === "insertbook" && sources.every(function (source) { return !source; })) sources.push("https://resapi.chaoxing.com/");
+                if (includeChaoxing && moduleName === "insertbook" && sources.every(function (source) { return !source; })) sources.push("https://resapi.chaoxing.com/");
                 sources.filter(Boolean).forEach(function (source) {
                   try { urls.push(new URL(source, document.baseURI).href); } catch (error) { urls.push(source); }
                 });
                 return urls;
               }, []).slice(0, 48);
-            }
+            },
+            args: [includeChaoxing]
           }, function (results) {
             if (!chrome.runtime.lastError) {
               (results || []).forEach(function (entry) {
@@ -297,9 +316,12 @@
     });
   }
 
-  function ensureBookAccess(site) {
+  function ensureBookAccess(site, mode) {
     if (!site || !site.ok || !site.originPattern) return Promise.resolve(site || { ok: false, error: "\u5f53\u524d\u9875\u9762\u4e0d\u652f\u6301\u56fe\u4e66\u63a7\u5236\u3002" });
-    return discoverBookFrameOrigins(site.tabId, site.originPattern).then(function (frameOrigins) {
+    if (mode !== "chaoxing" && /chaoxing\.com\/\*$/i.test(site.originPattern)) {
+      return Promise.resolve(Object.assign({}, site, { ok: false, error: "当前页面请使用“学习通版本”，普通图书和图片模式不会读取学习通内容。" }));
+    }
+    return discoverBookFrameOrigins(site.tabId, site.originPattern, mode).then(function (frameOrigins) {
       var requested = Array.from(new Set([site.originPattern].concat(frameOrigins).filter(Boolean)));
       return new Promise(function (resolve) {
         if (!chrome.permissions || typeof chrome.permissions.contains !== "function" || typeof chrome.permissions.request !== "function") {
@@ -328,7 +350,7 @@
                 frameAccessGranted: allowed,
                 bookFrameOrigins: frameOrigins,
                 preloadRegistered: registered,
-                error: allowed ? "" : requestError || "\u672a\u6388\u6743\u8bbf\u95ee\u5b66\u4e60\u901a\u56fe\u4e66\u9605\u8bfb\u6846\u67b6\u3002"
+                error: allowed ? "" : requestError || (mode === "chaoxing" ? "\u672a\u6388\u6743\u8bbf\u95ee\u5b66\u4e60\u901a\u56fe\u4e66\u9605\u8bfb\u6846\u67b6\u3002" : "未授权访问网页图书阅读框架。")
               }));
             });
           });

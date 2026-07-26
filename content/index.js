@@ -421,16 +421,20 @@
 
   function extractPageText() {
     var text = "";
+    var sourceLength = 0;
     try {
       text = document.body && document.body.innerText ? document.body.innerText : "";
     } catch (e) {}
     text = text.replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
-    if (text.length > 8000) text = text.slice(0, 8000);
+    sourceLength = text.length;
+    if (text.length > 40000) text = text.slice(0, 40000);
     return {
       ok: true,
       title: document.title || "",
       url: location.href,
       text: text,
+      sourceLength: sourceLength,
+      truncated: sourceLength > text.length,
       mediaCount: collectAll().length,
       applied: 0,
       rate: rate,

@@ -2,9 +2,12 @@
   "use strict";
 
   var SESSION_KEY = "pinnedPopupWindowId";
+  var TEACHING_MODE_KEY = "pinnedPopupTeachingMode";
   var STATE_KEY = "pinnedPopupWindowState";
   var DEFAULT_BOUNDS = { width: 320, height: 340 };
+  var TEACHING_BOUNDS = { width: 720, height: 600 };
   var openRequest = null;
+  var teachingModeRequest = Promise.resolve();
   var boundsSaveTimer = null;
   var pendingBoundsWindow = null;
 
@@ -35,9 +38,28 @@
     } catch (error) { callback({ ok: false, error: error.message || String(error) }); }
   }
 
+  function getStoredTeachingMode(callback) {
+    try {
+      chrome.storage.session.get([TEACHING_MODE_KEY], function (data) {
+        callback(!lastErrorMessage() && !!(data && data[TEACHING_MODE_KEY]));
+      });
+    } catch (error) { callback(false); }
+  }
+
+  function setStoredTeachingMode(enabled, callback) {
+    var data = {};
+    data[TEACHING_MODE_KEY] = enabled === true;
+    try {
+      chrome.storage.session.set(data, function () {
+        var error = lastErrorMessage();
+        callback(error ? { ok: false, error: error } : { ok: true });
+      });
+    } catch (error) { callback({ ok: false, error: error.message || String(error) }); }
+  }
+
   function clearStoredWindowId(callback) {
     try {
-      chrome.storage.session.remove([SESSION_KEY], function () {
+      chrome.storage.session.remove([SESSION_KEY, TEACHING_MODE_KEY], function () {
         lastErrorMessage();
         if (typeof callback === "function") callback();
       });
@@ -53,6 +75,10 @@
     if (Number.isFinite(value.left)) bounds.left = Math.round(value.left);
     if (Number.isFinite(value.top)) bounds.top = Math.round(value.top);
     return bounds;
+  }
+
+  function fixedBounds(teachingMode) {
+    return teachingMode === true ? TEACHING_BOUNDS : DEFAULT_BOUNDS;
   }
 
   function getPersistentState(callback) {
@@ -118,7 +144,7 @@
   }
 
   function isPinnedWindow(windowInfo) {
-    return !!(windowInfo && Array.isArray(windowInfo.tabs) && windowInfo.tabs.some(function (tab) {
+    return !!(windowInfo && windowInfo.type === "popup" && Array.isArray(windowInfo.tabs) && windowInfo.tabs.some(function (tab) {
       return String(tab && tab.url || "") === popupUrl();
     }));
   }
@@ -161,28 +187,31 @@
   }
 
   function restoreFixedBounds(windowInfo, focused, callback) {
-    var patch = {
-      width: DEFAULT_BOUNDS.width,
-      height: DEFAULT_BOUNDS.height
-    };
-    if (focused === true) patch.focused = true;
+    getStoredTeachingMode(function (teachingMode) {
+      var bounds = fixedBounds(teachingMode);
+      var patch = {
+        width: bounds.width,
+        height: bounds.height
+      };
+      if (focused === true) patch.focused = true;
 
-    function applyBounds() {
-      chrome.windows.update(windowInfo.id, patch, function (updated) {
-        var error = lastErrorMessage();
-        callback(error || !updated ? null : updated, error);
-      });
-    }
+      function applyBounds() {
+        chrome.windows.update(windowInfo.id, patch, function (updated) {
+          var error = lastErrorMessage();
+          callback(error || !updated ? null : updated, error);
+        });
+      }
 
-    if (windowInfo && windowInfo.state && windowInfo.state !== "normal") {
-      chrome.windows.update(windowInfo.id, { state: "normal" }, function (normalized) {
-        var error = lastErrorMessage();
-        if (error || !normalized) { callback(null, error || "Could not restore pinned window state."); return; }
-        applyBounds();
-      });
-      return;
-    }
-    applyBounds();
+      if (windowInfo && windowInfo.state && windowInfo.state !== "normal") {
+        chrome.windows.update(windowInfo.id, { state: "normal" }, function (normalized) {
+          var error = lastErrorMessage();
+          if (error || !normalized) { callback(null, error || "Could not restore pinned window state."); return; }
+          applyBounds();
+        });
+        return;
+      }
+      applyBounds();
+    });
   }
 
   function focusExistingWindow(windowInfo, recovered, callback) {
@@ -225,6 +254,82 @@
     return openRequest;
   }
 
+  function setTeachingMode(enabled, preferredWindowId) {
+    enabled = enabled === true;
+    function applyTeachingMode() {
+      return new Promise(function (resolve) {
+      function resizeWindow(existing) {
+        if (!existing || !isPinnedWindow(existing)) {
+          resolve({ ok: true, active: false, teachingMode: enabled });
+          return;
+        }
+        var windowId = existing.id;
+        setStoredWindowId(windowId, function (windowStored) {
+          if (windowStored.ok === false) { resolve(windowStored); return; }
+          setStoredTeachingMode(enabled, function (stored) {
+            if (stored.ok === false) { resolve(stored); return; }
+            restoreFixedBounds(existing, false, function (updated, updateError) {
+              if (updateError || !updated) {
+                resolve({ ok: false, error: updateError || "Could not resize pinned window." });
+                return;
+              }
+              var bounds = fixedBounds(enabled);
+              resolve({
+                ok: true,
+                active: true,
+                teachingMode: enabled,
+                windowId: windowId,
+                bounds: { width: bounds.width, height: bounds.height }
+              });
+            });
+          });
+        });
+      }
+
+      function recoverWindow() {
+        findExistingPinnedWindow(function (existing) {
+          resizeWindow(existing);
+        });
+      }
+
+      function readWindow(windowId, fallback) {
+        if (!Number.isInteger(windowId) || windowId < 0) {
+          fallback();
+          return;
+        }
+        chrome.windows.get(windowId, { populate: true }, function (existing) {
+          var error = lastErrorMessage();
+          if (error || !existing || !isPinnedWindow(existing)) {
+            fallback();
+            return;
+          }
+          resizeWindow(existing);
+        });
+      }
+
+      var preferred = Number(preferredWindowId);
+      if (Number.isInteger(preferred) && preferred >= 0) {
+        readWindow(preferred, function () {
+          getStoredWindowId(function (storedWindowId) {
+            if (storedWindowId === preferred) {
+              recoverWindow();
+              return;
+            }
+            readWindow(storedWindowId, recoverWindow);
+          });
+        });
+        return;
+      }
+      getStoredWindowId(function (storedWindowId) {
+        readWindow(storedWindowId, recoverWindow);
+      });
+      });
+    }
+    var result = teachingModeRequest.then(applyTeachingMode, applyTeachingMode);
+    teachingModeRequest = result.then(function () {}, function () {});
+    return result;
+  }
+
   function getState() {
     return new Promise(function (resolve) {
       Promise.all([
@@ -257,18 +362,21 @@
           var pending = pendingBoundsWindow;
           pendingBoundsWindow = null;
           if (!pending) return;
-          if (pending.width === DEFAULT_BOUNDS.width && pending.height === DEFAULT_BOUNDS.height) {
-            saveWindowState(pending, true);
-            return;
-          }
-          restoreFixedBounds(pending, false, function (updated, error) {
-            var corrected = Object.assign({}, pending, error || !updated ? {} : updated, {
-              left: pending.left,
-              top: pending.top,
-              width: DEFAULT_BOUNDS.width,
-              height: DEFAULT_BOUNDS.height
+          getStoredTeachingMode(function (teachingMode) {
+            var expected = fixedBounds(teachingMode);
+            if (pending.width === expected.width && pending.height === expected.height) {
+              saveWindowState(pending, true);
+              return;
+            }
+            restoreFixedBounds(pending, false, function (updated, error) {
+              var corrected = Object.assign({}, pending, error || !updated ? {} : updated, {
+                left: pending.left,
+                top: pending.top,
+                width: DEFAULT_BOUNDS.width,
+                height: DEFAULT_BOUNDS.height
+              });
+              saveWindowState(corrected, true);
             });
-            saveWindowState(corrected, true);
           });
         }, 250);
       });
@@ -288,7 +396,10 @@
 
   global.WinSpeedBallWindowService = {
     openPinnedWindow: openPinnedWindow,
+    setTeachingMode: setTeachingMode,
     getState: getState,
-    normalizeBounds: normalizeBounds
+    normalizeBounds: normalizeBounds,
+    defaultBounds: Object.freeze({ width: DEFAULT_BOUNDS.width, height: DEFAULT_BOUNDS.height }),
+    teachingBounds: Object.freeze({ width: TEACHING_BOUNDS.width, height: TEACHING_BOUNDS.height })
   };
 })(self);

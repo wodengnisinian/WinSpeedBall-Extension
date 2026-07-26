@@ -3,6 +3,7 @@
 
   var DEFAULT_TTL_MS = 2 * 60 * 1000;
   var MAX_INTENTS = 20;
+  var BOOK_MODES = ["book", "image", "chaoxing"];
 
   function create(options) {
     options = options || {};
@@ -41,6 +42,21 @@
       return left.length === right.length && left.every(function (value, index) { return value === right[index]; });
     }
 
+    function resolveBookMode(capabilities, value) {
+      var hasBookCapability = capabilities.some(function (capability) {
+        return String(capability || "").indexOf("book.") === 0;
+      });
+      if (!hasBookCapability) {
+        return value == null || value === ""
+          ? { ok: true, value: "" }
+          : failure("SDK_BOOK_MODE_UNEXPECTED", "Book mode is only valid for book capabilities.");
+      }
+      var selectedMode = String(value || "").trim().toLowerCase();
+      return BOOK_MODES.indexOf(selectedMode) >= 0
+        ? { ok: true, value: selectedMode }
+        : failure("SDK_BOOK_MODE_REQUIRED", "A valid book authorization mode is required.");
+    }
+
     function purge(intents, timestamp) {
       Object.keys(intents).forEach(function (nonce) {
         var record = intents[nonce];
@@ -57,9 +73,11 @@
       return result;
     }
 
-    function prepare(capabilities) {
+    function prepare(capabilities, bookMode) {
       var normalized = normalizedCapabilities(capabilities);
       if (!normalized.length) return Promise.resolve(failure("SDK_CAPABILITY_REQUIRED", "At least one SDK capability is required."));
+      var selectedBookMode = resolveBookMode(normalized, bookMode);
+      if (!selectedBookMode.ok) return Promise.resolve(selectedBookMode);
       return resolveCurrent(normalized).then(function (context) {
         if (!context || context.ok === false) return context || failure("SDK_CONTEXT_UNAVAILABLE", "SDK context is unavailable.");
         var nonce;
@@ -73,6 +91,7 @@
           originPattern: String(context.originPattern || ""),
           url: String(context.url || context.origin || ""),
           capabilities: normalized,
+          bookMode: selectedBookMode.value,
           issuedAt: issuedAt,
           expiresAt: issuedAt + DEFAULT_TTL_MS
         };
@@ -93,6 +112,7 @@
                 originPattern: record.originPattern,
                 url: record.url,
                 capabilities: record.capabilities.slice(),
+                bookMode: record.bookMode,
                 issuedAt: record.issuedAt,
                 expiresAt: record.expiresAt
               };
@@ -104,9 +124,11 @@
       });
     }
 
-    function consume(nonce, capabilities) {
+    function consume(nonce, capabilities, bookMode) {
       if (!validNonce(nonce)) return Promise.resolve(failure("SDK_CONTEXT_NONCE_INVALID", "SDK context confirmation is invalid."));
       var requested = normalizedCapabilities(capabilities);
+      var selectedBookMode = resolveBookMode(requested, bookMode);
+      if (!selectedBookMode.ok) return Promise.resolve(selectedBookMode);
       return enqueue(function () {
         return readIntents().then(function (intents) {
           intents = safeIntentMap(intents);
@@ -119,6 +141,9 @@
             if (Number(record.expiresAt || 0) <= now()) return failure("SDK_CONTEXT_NONCE_EXPIRED", "SDK context confirmation expired.");
             var declared = normalizedCapabilities(record.capabilities);
             if (!sameCapabilities(declared, requested)) return failure("SDK_CONTEXT_CAPABILITY_MISMATCH", "SDK context capabilities changed after confirmation.");
+            if (String(record.bookMode || "") !== selectedBookMode.value) {
+              return failure("SDK_CONTEXT_BOOK_MODE_MISMATCH", "SDK book authorization mode changed after confirmation.");
+            }
             return validateContext(record).then(function (validated) {
               if (!validated || validated.ok === false) return validated || failure("SDK_CONTEXT_CHANGED", "SDK context changed after confirmation.");
               return Object.assign({ ok: true }, record);

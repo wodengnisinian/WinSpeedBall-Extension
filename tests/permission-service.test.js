@@ -187,15 +187,19 @@ test("revoke removes a persistent grant", async () => {
   assert.equal(denied.code, "SDK_GRANT_REQUIRED");
 });
 
-test("runtime token is short-lived, capability-scoped, origin-scoped, and session-only", async () => {
+test("runtime token is persistent, capability-scoped, origin-scoped, and session-only", async () => {
   const { service, localData, sessionData } = buildService();
   await service.grant(binding());
-  const created = await service.createRuntimeToken(binding(), 5000);
+  const created = await service.createRuntimeToken(binding());
   assert.equal(created.ok, true);
+  assert.equal(created.persistent, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(created, "expiresAt"), false);
   assert.match(created.token, /^wsb_rt_[a-f0-9]{64}$/);
   assert.equal(JSON.stringify(localData).includes(created.token), false);
   assert.deepEqual(Object.keys(localData), ["sdkPermissionGrants"]);
   assert.equal(Object.prototype.hasOwnProperty.call(sessionData.sdkRuntimeTokens, created.token), true);
+  assert.equal(sessionData.sdkRuntimeTokens[created.token].persistent, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(sessionData.sdkRuntimeTokens[created.token], "expiresAt"), false);
 
   const valid = await service.validateRuntimeToken(created.token, {
     scriptId: "study-helper",
@@ -242,20 +246,40 @@ test("runtime token is short-lived, capability-scoped, origin-scoped, and sessio
   assert.equal(afterRevoke.code, "SDK_TOKEN_INVALID");
 });
 
-test("runtime token expires and rejects excessive lifetime", async () => {
+test("runtime token remains valid after long elapsed time", async () => {
   const fixture = buildService();
   await fixture.service.grant(binding());
-  const tooLong = await fixture.service.createRuntimeToken(binding(), fixture.service.MAX_TOKEN_TTL_MS + 1);
-  assert.equal(tooLong.code, "SDK_TOKEN_TTL_INVALID");
-  const created = await fixture.service.createRuntimeToken(binding(), 1000);
-  fixture.advance(1001);
-  const expired = await fixture.service.validateRuntimeToken(created.token, {
+  const created = await fixture.service.createRuntimeToken(binding());
+  fixture.advance(10 * 365 * 24 * 60 * 60 * 1000);
+  const valid = await fixture.service.validateRuntimeToken(created.token, {
     scriptId: "study-helper",
     sdkVersion: "3.7.0-beta",
     capability: "video.read",
     origin: "https://example.com/"
   });
-  assert.equal(expired.code, "SDK_TOKEN_EXPIRED");
+  assert.equal(valid.ok, true);
+  assert.equal(valid.valid, true);
+  assert.equal(valid.persistent, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(valid, "expiresAt"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(fixture.sessionData.sdkRuntimeTokens, created.token), true);
+});
+
+test("legacy expiring runtime tokens are retired during migration", async () => {
+  const fixture = buildService();
+  await fixture.service.grant(binding());
+  const created = await fixture.service.createRuntimeToken(binding());
+  fixture.sessionData.sdkRuntimeTokens[created.token] = Object.assign(
+    {},
+    fixture.sessionData.sdkRuntimeTokens[created.token],
+    { persistent: false, expiresAt: fixture.sharedState.clock.now + 5000 }
+  );
+  const retired = await fixture.service.validateRuntimeToken(created.token, {
+    scriptId: "study-helper",
+    sdkVersion: "3.7.0-beta",
+    capability: "video.read",
+    origin: "https://example.com/"
+  });
+  assert.equal(retired.code, "SDK_TOKEN_INVALID");
   assert.equal(fixture.sessionData.sdkRuntimeTokens, undefined);
 });
 

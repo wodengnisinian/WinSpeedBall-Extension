@@ -2,10 +2,10 @@
   "manifest_version": 3,
   "minimum_chrome_version": "135",
   "name": "WinSpeedBall",
-  "version": "3.7.0",
-  "version_name": "3.7.0 Developer Beta",
+  "version": "3.8.5",
+  "version_name": "3.8.5 Developer Beta",
   "description": "Chromium AI learning platform with video tools, local OCR and Whisper speech recognition, configurable AI, sandboxed SDK, and Developer Mode.",
-  "permissions": ["activeTab", "scripting", "storage", "alarms", "offscreen", "tabCapture", "userScripts", "webNavigation"],
+  "permissions": ["activeTab", "scripting", "storage", "unlimitedStorage", "alarms", "offscreen", "tabCapture", "userScripts", "webNavigation"],
   "optional_host_permissions": [
     "http://*/*",
     "https://*/*",
@@ -39,7 +39,7 @@
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'",
-    "sandbox": "sandbox allow-scripts; script-src 'self' 'unsafe-inline' 'unsafe-eval'; worker-src blob:; object-src 'none'"
+    "sandbox": "sandbox allow-scripts; script-src 'self' 'unsafe-inline' 'unsafe-eval'; worker-src blob:; font-src 'none'; object-src 'none'"
   },
   "sandbox": {
     "pages": ["workspace/index.html", "sdk/script-runner.html"]

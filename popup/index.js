@@ -16,7 +16,20 @@
   var logApi = window.WinSpeedBallLogRecord;
   var lastPanelId = "videoPanel";
   var panelSelectedThisOpen = false;
+  var questionViewSelectedThisOpen = false;
+  var bookViewSelectedThisOpen = false;
+  var logViewSelectedThisOpen = false;
+  var viewModeSelectedThisOpen = false;
+  var lastLogView = "runtime";
   var panelScrollPositions = Object.create(null);
+  var popupScrollSaveTimer = null;
+  var popupStateRestored = false;
+  var mainScrollSurface = null;
+  var aiTeachingPageScrollSurface = null;
+  var declarationScrollSurface = null;
+  var logScrollRestorePending = false;
+  var pendingPanelScrollRestore = null;
+  var QUESTION_VIEW_STORAGE_KEY = "popupLastQuestionView";
   var MAX_SAVED_SCRIPT_LENGTH = 200000;
   var MIN_AUTO_INTERVAL_SECONDS = 30;
   var MIN_CHAOXING_INTERVAL_SECONDS = 2;
@@ -72,7 +85,7 @@
     retryManualOcr: ["OCR", "重新识别"],
     startTabAudioCapture: ["语音", "开始获取网页声音"],
     stopTabAudioCapture: ["语音", "停止录音并识别"],
-    cancelTabAudioCapture: ["语音", "取消网页语音获取"],
+    cancelTabAudioCapture: ["语音", "取消语音问题获取"],
     acceptUsageDeclaration: ["使用声明", "接受使用声明"],
     setDeveloperMode: ["开发者", "更新开发者模式"],
     prepareSdkContext: ["开发者", "准备 SDK 上下文"],
@@ -82,6 +95,7 @@
     deleteSdkScriptData: ["开发者", "删除 SDK 脚本数据"],
     clearPrivacyData: ["隐私", "清理隐私数据"],
     openPinnedWindow: ["窗口", "打开独立窗口"],
+    setPinnedWindowTeachingMode: ["窗口", "切换AI教学窗口尺寸"],
     registerUser: ["账户", "注册账户"],
     loginUser: ["账户", "登录账户"],
     logoutUser: ["账户", "退出账户"],
@@ -94,6 +108,7 @@
     showAiReplyWindow: ["AI", "打开 AI 回复窗口"]
   };
   var popupUtils = self.WinSpeedBallPopupUtils;
+  var scrollSurfaceApi = self.WinSpeedBallScrollSurface;
   var popupStorage = self.WinSpeedBallPopupStorage;
   var messageClient = self.WinSpeedBallPopupMessageClient;
   var text = popupUtils.text;
@@ -134,6 +149,8 @@
     contracts: self.WinSpeedBallSdkContracts,
     protocol: self.WinSpeedBallSdkSessionProtocol,
     ensureSiteAccess: ensureSiteAccess,
+    ensureMediaAccess: ensureMediaAccess,
+    ensureBookAccess: ensureBookAccess,
     confirmAction: function (message) { return window.confirm(message); },
     runtimeUrl: function (path) { return chrome.runtime.getURL(path); }
   });
@@ -302,7 +319,8 @@
     var categories = {
       videoPanel: "视频",
       ocrPanel: "OCR",
-      aiPanel: "AI",
+      aiPanel: "AI答题",
+      aiTeachingPanel: "AI教学",
       bookPanel: "图书",
       settingsPanel: "设置",
       accountPanel: "账户",
@@ -436,14 +454,166 @@
     list.appendChild(fragment);
     if (keepAtTop) list.scrollTop = 0;
     else list.scrollTop = Math.max(0, previousTop + list.scrollHeight - previousHeight);
+    if (popupStateRestored && logScrollRestorePending) {
+      requestAnimationFrame(function () {
+        list.scrollTop = Number(panelScrollPositions.logRuntime || 0);
+        logScrollRestorePending = false;
+      });
+    }
     $("logTotalCount").textContent = String(logs.length);
     $("logErrorCount").textContent = String(logs.filter(function (record) { return record.level === "error"; }).length);
     $("logVisibleCount").textContent = String(visible.length);
   }
 
+  function captureScrollPositions() {
+    var content = $("mainContent") || document.querySelector(".content");
+    var activePanel = document.querySelector(".panel.active");
+    if (content && activePanel) {
+      panelScrollPositions[activePanel.id] = pendingPanelScrollRestore &&
+        pendingPanelScrollRestore.panelId === activePanel.id && !panelSelectedThisOpen
+        ? pendingPanelScrollRestore.target
+        : Math.max(0, Math.round(Number(content.scrollTop || 0)));
+    }
+    var teachingContent = $("aiTeachingContent");
+    var logList = $("logList");
+    var updateLogView = $("updateLogView");
+    if (teachingContent) panelScrollPositions.aiTeachingPage = Math.max(0, Math.round(Number(teachingContent.scrollTop || 0)));
+    if (logList) panelScrollPositions.logRuntime = Math.max(0, Math.round(Number(logList.scrollTop || 0)));
+    if (updateLogView) panelScrollPositions.logUpdates = Math.max(0, Math.round(Number(updateLogView.scrollTop || 0)));
+    return Object.assign({}, panelScrollPositions);
+  }
+
+  function schedulePopupScrollSave() {
+    if (!popupStateRestored) return;
+    if (popupScrollSaveTimer) clearTimeout(popupScrollSaveTimer);
+    popupScrollSaveTimer = setTimeout(function () {
+      popupScrollSaveTimer = null;
+      savePopupState();
+    }, 220);
+  }
+
+  function updateScrollSurfaces() {
+    [mainScrollSurface, aiTeachingPageScrollSurface, declarationScrollSurface].forEach(function (surface) {
+      if (surface) surface.scheduleUpdate();
+    });
+  }
+
+  function continuePanelScrollRestore() {
+    var pending = pendingPanelScrollRestore;
+    var content = $("mainContent") || document.querySelector(".content");
+    if (!pending || !content || panelSelectedThisOpen || lastPanelId !== pending.panelId) {
+      pendingPanelScrollRestore = null;
+      return;
+    }
+    var max = Math.max(0, Number(content.scrollHeight || 0) - Number(content.clientHeight || 0));
+    content.scrollTop = Math.min(pending.target, max);
+    if (pending.target <= max + 2 && Math.abs(content.scrollTop - pending.target) <= 2) {
+      pendingPanelScrollRestore = null;
+    }
+    if (mainScrollSurface) mainScrollSurface.scheduleUpdate();
+  }
+
+  function beginPanelScrollRestore(panelId) {
+    var target = Math.max(0, Number(panelScrollPositions[panelId] || 0));
+    if (!target) {
+      pendingPanelScrollRestore = null;
+      return;
+    }
+    pendingPanelScrollRestore = { panelId: panelId, target: target };
+    [0, 60, 180, 420, 900, 1600].forEach(function (delay) {
+      setTimeout(continuePanelScrollRestore, delay);
+    });
+  }
+
+  function bindScrollSurfaces() {
+    if (!scrollSurfaceApi || typeof scrollSurfaceApi.create !== "function") return;
+    var content = $("mainContent") || document.querySelector(".content");
+    var teachingContent = $("aiTeachingContent");
+    var declarationContent = $("declarationGateScroll");
+
+    if (content) {
+      mainScrollSurface = scrollSurfaceApi.create({
+        element: content,
+        progress: $("mainScrollProgress"),
+        topButton: $("mainScrollTopBtn"),
+        observeMutations: true,
+        onUpdate: function (state) {
+          if (!popupStateRestored) return;
+          if (pendingPanelScrollRestore && pendingPanelScrollRestore.panelId === lastPanelId && !panelSelectedThisOpen) {
+            var pendingTarget = pendingPanelScrollRestore.target;
+            var availableTarget = Math.min(pendingTarget, state.max);
+            if (Math.abs(state.top - availableTarget) > 2) {
+              mainScrollSurface.setPosition(availableTarget, false);
+            } else if (pendingTarget <= state.max + 2 && Math.abs(state.top - pendingTarget) <= 2) {
+              pendingPanelScrollRestore = null;
+            }
+            return;
+          }
+          var position = Math.max(0, Math.round(state.top));
+          if (Number(panelScrollPositions[lastPanelId] || 0) === position) return;
+          panelScrollPositions[lastPanelId] = position;
+          schedulePopupScrollSave();
+        }
+      });
+      ["wheel", "pointerdown", "touchstart"].forEach(function (type) {
+        content.addEventListener(type, function () {
+          if (popupStateRestored) pendingPanelScrollRestore = null;
+        }, { passive: true });
+      });
+      content.addEventListener("keydown", function (event) {
+        if (["Home", "End", "PageUp", "PageDown", "ArrowUp", "ArrowDown"].indexOf(event.key) >= 0 && popupStateRestored) {
+          pendingPanelScrollRestore = null;
+        }
+      });
+    }
+    if (teachingContent) {
+      aiTeachingPageScrollSurface = scrollSurfaceApi.create({
+        element: teachingContent,
+        progress: $("aiTeachingPageScrollProgress"),
+        topButton: $("aiTeachingPageScrollTopBtn"),
+        observeMutations: true,
+        onUpdate: function (state) {
+          if (!popupStateRestored) return;
+          var position = Math.max(0, Math.round(state.top));
+          if (Number(panelScrollPositions.aiTeachingPage || 0) === position) return;
+          panelScrollPositions.aiTeachingPage = position;
+          schedulePopupScrollSave();
+        }
+      });
+    }
+    if (declarationContent) {
+      declarationScrollSurface = scrollSurfaceApi.create({
+        element: declarationContent,
+        observeMutations: true
+      });
+    }
+    document.querySelectorAll(".message").forEach(function (element) {
+      if (element.id === "aiTeachingGuidance" || element.hasAttribute("tabindex")) return;
+      element.tabIndex = 0;
+      if (!element.getAttribute("aria-label")) element.setAttribute("aria-label", "可滚动状态内容");
+    });
+  }
+
+  function restoreAdditionalScrollPositions() {
+    var logList = $("logList");
+    var updateLogView = $("updateLogView");
+    if (logList) logList.scrollTop = Number(panelScrollPositions.logRuntime || 0);
+    if (updateLogView) updateLogView.scrollTop = Number(panelScrollPositions.logUpdates || 0);
+    if (aiTeachingPageScrollSurface) {
+      aiTeachingPageScrollSurface.setPosition(Number(panelScrollPositions.aiTeachingPage || 0), false);
+    }
+    updateScrollSurfaces();
+  }
+
   function currentPopupState() {
+    var activeQuestionView = document.querySelector("[data-ocr-view].active");
     return {
       lastPanelId: lastPanelId,
+      viewMode: document.body.classList.contains("ai-teaching-mode") ? "aiTeaching" : "main",
+      questionView: activeQuestionView ? activeQuestionView.dataset.ocrView : "capture",
+      bookView: bookPanelState.selectedMode,
+      logView: lastLogView,
+      scrollPositions: captureScrollPositions(),
       chromeHidden: true,
       scriptWorkspaceActive: document.body.classList.contains("script-ui-active"),
       lastWorkspaceScript: lastWorkspaceScript
@@ -456,11 +626,17 @@
 
   function restorePopupStateOnOpen() {
     windowModeController.loadState(function (state, data) {
+      panelScrollPositions = Object.assign(Object.create(null), state.scrollPositions || {});
+      logScrollRestorePending = true;
+      beginPanelScrollRestore(state.lastPanelId);
       document.body.classList.add("chrome-hidden");
       if (!panelSelectedThisOpen && state.lastPanelId) {
         lastPanelId = state.lastPanelId;
         showPanel(lastPanelId, false);
       }
+      if (!questionViewSelectedThisOpen) selectOcrView(state.questionView, false);
+      if (!bookViewSelectedThisOpen) selectBookView(state.bookView, false);
+      if (!logViewSelectedThisOpen) selectLogView(state.logView, false);
       if (state.lastWorkspaceScript && state.lastWorkspaceScript.code) {
         lastWorkspaceScript = state.lastWorkspaceScript;
       } else if (data && data.lastWorkspaceScript && data.lastWorkspaceScript.code) {
@@ -474,7 +650,15 @@
           lastWorkspaceScript.permissionConfirmed === true,
           lastWorkspaceScript.permissionSignature
         );
+      } else if (!viewModeSelectedThisOpen) {
+        setAiTeachingMode(state.viewMode === "aiTeaching", false);
       }
+      requestAnimationFrame(function () {
+        restoreAdditionalScrollPositions();
+        popupStateRestored = true;
+        document.documentElement.dataset.uiRestored = "true";
+        updateScrollSurfaces();
+      });
     });
   }
 
@@ -516,17 +700,19 @@
     });
     document.body.classList.toggle("video-panel-active", panelId === "videoPanel");
     lastPanelId = panelId;
+    if (content) content.scrollTop = Number(panelScrollPositions[panelId] || 0);
     if (remember) {
       savePopupState();
     }
     if (content) {
       requestAnimationFrame(function () {
         content.scrollTop = Number(panelScrollPositions[panelId] || 0);
+        if (mainScrollSurface) mainScrollSurface.update();
       });
     }
   }
 
-  function selectOcrView(view) {
+  function selectOcrView(view, remember) {
     view = ["capture", "voice"].indexOf(view) >= 0 ? view : "capture";
     document.querySelectorAll("[data-ocr-view]").forEach(function (button) {
       var active = button.dataset.ocrView === view;
@@ -536,9 +722,56 @@
     });
     $("ocrCaptureView").classList.toggle("hidden", view !== "capture");
     $("voiceCaptureView").classList.toggle("hidden", view !== "voice");
+    if (remember === true) {
+      questionViewSelectedThisOpen = true;
+      var data = {};
+      data[QUESTION_VIEW_STORAGE_KEY] = view;
+      savePopupState(data);
+    }
   }
 
-  function selectBookView(view) {
+  function setAiTeachingMode(enabled, remember) {
+    enabled = enabled === true;
+    var teachingContent = $("aiTeachingContent");
+    var wasEnabled = document.body.classList.contains("ai-teaching-mode");
+    if (!enabled && wasEnabled && teachingContent) {
+      panelScrollPositions.aiTeachingPage = Math.max(0, Math.round(Number(teachingContent.scrollTop || 0)));
+    }
+    hideScriptChromeNow();
+    document.documentElement.classList.toggle("ai-teaching-mode", enabled);
+    document.body.classList.toggle("ai-teaching-mode", enabled);
+    if (isPinnedWindow && wasEnabled !== enabled) {
+      sendMessage({
+        action: "setPinnedWindowTeachingMode",
+        payload: { enabled: enabled }
+      });
+    }
+    if (enabled) {
+      document.body.classList.remove("nav-open", "right-open", "top-open");
+      var problem = $("aiTeachingProblem");
+      if (problem) setTimeout(function () { problem.focus(); }, 0);
+      requestAnimationFrame(function () {
+        if (aiTeachingPageScrollSurface) {
+          aiTeachingPageScrollSurface.setPosition(Number(panelScrollPositions.aiTeachingPage || 0), false);
+        }
+      });
+    } else {
+      var trigger = $("openAiTeachingBtn");
+      if (trigger) setTimeout(function () { trigger.focus(); }, 0);
+    }
+    if (remember === true) {
+      viewModeSelectedThisOpen = true;
+      savePopupState();
+    }
+    updateScrollSurfaces();
+  }
+
+  function bindAiTeachingMode() {
+    $("openAiTeachingBtn").addEventListener("click", function () { setAiTeachingMode(true, true); });
+    $("closeAiTeachingBtn").addEventListener("click", function () { setAiTeachingMode(false, true); });
+  }
+
+  function selectBookView(view, remember) {
     view = normalizeBookMode(view);
     bookPanelState.selectedMode = view;
     document.querySelectorAll("[data-book-view]").forEach(function (button) {
@@ -551,6 +784,10 @@
     $("bookImageView").classList.toggle("hidden", view !== "image");
     $("bookChaoxingView").classList.toggle("hidden", view !== "chaoxing");
     $("bookBackCoverMonitor").classList.toggle("hidden", view !== "chaoxing");
+    if (remember === true) {
+      bookViewSelectedThisOpen = true;
+      savePopupState();
+    }
   }
 
   function normalizeBookMode(mode) {
@@ -771,7 +1008,7 @@
     ["bookStopBtn", "bookImageStopBtn", "bookChaoxingStopBtn"].forEach(function (id) { $(id).disabled = !bookPanelState.running; });
     var readerLabel = mode === "image"
       ? "\u56fe\u7247\u5e8f\u5217\u9605\u8bfb\u5668"
-      : (mode === "chaoxing" ? "超星 PDG/JPath 图像书" : ((res.reader || bookPanelState.reader[mode]) === "chaoxing-book" ? "\u5b66\u4e60\u901a\u5185\u5d4c\u56fe\u4e66" : "\u7f51\u9875\u56fe\u4e66\u9605\u8bfb\u5668"));
+      : (mode === "chaoxing" ? "超星 PDG/JPath 图像书" : "\u7f51\u9875\u56fe\u4e66\u9605\u8bfb\u5668");
     var detectedMessage = (res.detected || bookPanelState.detected[mode])
       ? "\u5df2\u68c0\u6d4b\u5230" + readerLabel + (res.page ? (mode === "image" ? "\uff0c\u5f53\u4f4d\u7f6e\uff1a" : "\uff0c\u5f53\u524d\u9875\u7801\uff1a") + res.page : "") + (res.imageCount ? "/" + res.imageCount : "") + "\u3002"
       : "";
@@ -781,29 +1018,21 @@
   }
 
   function bookControlMethodLabel(method) {
-    if (method === "jpath-native-controller") return "超星原生阅读器";
-    if (method === "jpath-image-controller") return "超星图片控制器";
-    if (method === "image-native-scroll") return "浏览器图片滚动控制器";
-    if (method === "jpath-dom-force") return "超星图片节点强制切换";
-    if (method === "chaoxing-pdg-native") return "学习通 PDG 原生阅读器";
-    if (method === "chaoxing-pdg-force") return "学习通 PDG 页面强制切换";
+    if (method === "browser-native-scroll") return "浏览器原生滚动";
     if (method === "browser-native-click") return "浏览器原生按钮";
-    if (method === "page-native-controller") return "页面原生控制器";
-    if (method === "browser-native-keyboard") return "浏览器原生方向键";
-    if (method === "button") return "阅读器按钮";
-    return "方向键";
+    if (method === "chaoxing-pdg-native") return "学习通 PDG 阅读器控制器";
+    if (method === "chaoxing-pdg-force") return "学习通 JPath 页面切换";
+    return "浏览器原生控制器";
   }
 
   function bookControlErrorMessage(res) {
     var code = String(res && res.error || "");
     if (code === "BOOK_NATIVE_CONTROL_FAILED") {
-      if (res && res.jpathDomError === "JPATH_TARGET_IMAGE_NOT_FOUND") return "没有找到可切换的目标图片，可能已经到达第一页或最后一页。";
-      if (res && res.jpathControllerError === "JPATH_PAGE_DID_NOT_CHANGE") return "学习通阅读器拒绝了翻页，并且图片节点强制切换也没有成功。";
-      return "已找到阅读器，但阅读器没有响应页码、图片或按钮控制。";
+      return "已找到阅读器，但没有找到可用的原生翻页按钮或原生滚动位置。";
     }
     if (code === "BOOK_READER_NOT_FOUND") return "没有在当前页面或内嵌框架中找到可控制的图书阅读器。";
     if (code === "CHAOXING_PDG_READER_NOT_FOUND") return "没有检测到学习通 PDG/JPath 图像书。请先在学习通章节中真正打开图书阅读页。";
-    if (code === "CHAOXING_PDG_TURN_FAILED") return "已检测到学习通图像书，但页码、目标图片或学习通阅读器状态没有发生变化。";
+    if (code === "CHAOXING_PDG_TURN_FAILED") return "已检测到学习通图像书，但页面控制器和 JPath 页面切换均未生效。";
     return code || "未知错误";
   }
 
@@ -818,7 +1047,7 @@
     return sendMessage(payload).then(function (res) {
       if (!res.ok) res.error = bookControlErrorMessage(res);
       var successMessage = message;
-      if (res.ok && command === "DETECT") successMessage = mode === "image" ? "已检测到图片序列，图片原生控制已就绪。" : (mode === "chaoxing" ? "已检测到学习通 PDG/JPath 图像书，专用控制已就绪。" : (res.reader === "chaoxing-book" ? "已检测到学习通内嵌图书" : "已检测到网页图书阅读器") + (res.nativeController ? "，MAIN 原生强控已就绪。" : "。"));
+      if (res.ok && command === "DETECT") successMessage = mode === "image" ? "已检测到图片序列，图片原生控制已就绪。" : (mode === "chaoxing" ? "已检测到学习通 PDG/JPath 图像书，专用控制已就绪。" : "已检测到网页图书阅读器" + (res.nativeController ? "，MAIN 原生强控已就绪。" : "。"));
       else if (res.ok && (command === "NEXT" || command === "PREV")) {
         successMessage = "已通过" + bookControlMethodLabel(res.method) + (mode === "image" ? (command === "NEXT" ? "翻到下一张。" : "翻到上一张。") : (command === "NEXT" ? "翻到下一页。" : "翻到上一页。"));
       }
@@ -848,7 +1077,7 @@
   function sendBookTargetCommand(command, interval, message, mode) {
     mode = normalizeBookMode(mode);
     return getCurrentSiteAccess().then(function (site) {
-      return ensureBookAccess(site);
+      return ensureBookAccess(site, mode);
     }).then(function (site) {
       if (!site || !site.ok) {
         updateBookPanel({ ok: false, running: bookPanelState.running, interval: interval || bookPanelState.interval, mode: mode, error: site && site.error || "\u5f53\u524d\u9875\u9762\u4e0d\u652f\u6301\u56fe\u4e66\u63a7\u5236\u3002" });
@@ -863,7 +1092,7 @@
     document.querySelectorAll("[data-book-view]").forEach(function (button) {
       button.addEventListener("click", function () {
         var view = normalizeBookMode(button.dataset.bookView);
-        selectBookView(view);
+        selectBookView(view, true);
         if (view === "chaoxing") {
           sendMessage({ action: "bookPanel", command: "GET_STATE", mode: "chaoxing" }).then(function (res) { updateBookPanel(res || {}); });
         }
@@ -922,7 +1151,7 @@
   }
 
   function openScriptNav() {
-    if (!document.body.classList.contains("chrome-hidden")) return;
+    if (!document.body.classList.contains("chrome-hidden") || document.body.classList.contains("ai-teaching-mode")) return;
     clearTimeout(navHideTimer);
     document.body.classList.add("nav-open");
   }
@@ -950,7 +1179,7 @@
   }
 
   function openScriptRight() {
-    if (!document.body.classList.contains("chrome-hidden")) return;
+    if (!document.body.classList.contains("chrome-hidden") || document.body.classList.contains("ai-teaching-mode")) return;
     clearTimeout(rightHideTimer);
     document.body.classList.add("right-open");
   }
@@ -963,7 +1192,7 @@
   }
 
   function openScriptTop() {
-    if (!document.body.classList.contains("chrome-hidden")) return;
+    if (!document.body.classList.contains("chrome-hidden") || document.body.classList.contains("ai-teaching-mode")) return;
     clearTimeout(topHideTimer);
     document.body.classList.add("top-open");
   }
@@ -993,6 +1222,10 @@
     }
     document.addEventListener("mousemove", function (event) {
       if (!document.body.classList.contains("chrome-hidden")) return;
+      if (document.body.classList.contains("ai-teaching-mode")) {
+        hideScriptChromeNow();
+        return;
+      }
       var width = window.innerWidth || document.documentElement.clientWidth || 0;
       var inLeftZone = event.clientX <= navZones.left.width && event.clientY >= navZones.left.top && event.clientY <= navZones.left.bottom;
       var inRightZone = width && event.clientX >= width - navZones.right.width && event.clientY >= navZones.right.top && event.clientY <= navZones.right.bottom;
@@ -1176,7 +1409,7 @@
           if (Number(res.aiSourceTime || 0) === lastCaptureTime && res.aiResponse) {
             $("aiMode").value = "custom";
             $("aiQuestion").value = res.aiPrompt || res.ocrText;
-            $("aiAnswer").value = res.aiResponse;
+            renderAiAnswerValue(res.aiResponse);
             $("ocrStatus").textContent = text("\u5df2\u6062\u590d OCR \u7ed3\u679c\u548c AI \u56de\u590d\u3002");
             addDetailedLog("AI", "\u6062\u590d\u5df2\u4fdd\u5b58\u56de\u590d", {
               \u4efb\u52a1: captureLabel(lastCaptureTime),
@@ -1305,24 +1538,25 @@
     });
   }
 
-  function extractPageText() {
+  function readPageTextFromCurrentTab() {
     setTopStatus(text("\u8bfb\u53d6\u9875\u9762"));
     return control({ type: "EXTRACT_PAGE_TEXT" }).then(function (res) {
-      var first = null;
-      (res.frameResults || []).some(function (item) {
-        if (item && item.ok && item.text) {
-          first = item;
-          return true;
-        }
-        return false;
-      });
-      latestPageText = first ? first.text : "";
-      if (latestPageText && !$("aiQuestion").value.trim()) {
-        $("aiQuestion").value = text("\u8bf7\u603b\u7ed3\u5f53\u524d\u9875\u9762\u5185\u5bb9");
+      var combined = aiController.combineFrameText(res.frameResults || [], 38000);
+      latestPageText = combined.text;
+      setTopStatus(latestPageText
+        ? (combined.truncated ? text("\u5df2\u622a\u53d6") : text("\u5b8c\u6210"))
+        : text("\u65e0\u6587\u5b57"));
+      return latestPageText;
+    });
+  }
+
+  function extractPageText() {
+    return readPageTextFromCurrentTab().then(function (pageText) {
+      if (latestPageText && $("aiMode").value === "custom" && !$("aiQuestion").value.trim()) {
+        $("aiQuestion").value = text("\u53ea\u8f93\u51fa\u6700\u7b80\u6700\u7ec8\u7b54\u6848\uff0c\u4e0d\u8981\u89e3\u6790\u3001\u4e0d\u8981\u590d\u8ff0\u9898\u76ee\u3001\u4e0d\u8981\u6dfb\u52a0\u6807\u9898\uff1b\u9898\u76ee\u660e\u786e\u8981\u6c42\u8fc7\u7a0b\u65f6\u9664\u5916\u3002");
         scheduleAiProviderWorkspaceSave();
       }
-      setTopStatus(latestPageText ? text("\u5b8c\u6210") : text("\u65e0\u6587\u5b57"));
-      return latestPageText;
+      return pageText;
     });
   }
 
@@ -1340,6 +1574,16 @@
   });
   var askAi = aiController.ask;
   var loadAiHistory = aiController.loadHistory;
+  var aiTeachingController = self.WinSpeedBallAiTeachingController.create({
+    byId: $,
+    sendMessage: sendMessage,
+    storage: popupStorage,
+    readPageText: readPageTextFromCurrentTab,
+    setTopStatus: setTopStatus,
+    addDetailedLog: addDetailedLog,
+    isProviderConfigured: function (providerId) { return findProviderOption(providerId).configured; },
+    onProviderUnconfigured: showAiUnconfiguredDialog
+  });
 
   function normalizeProviderId(providerId) {
     providerId = String(providerId || "").toLowerCase();
@@ -1382,17 +1626,48 @@
   }
 
   function emptyAiWorkspace() {
-    return { mode: "summary", question: "", answer: "" };
+    return { mode: "custom", question: "", answer: "" };
   }
 
   function normalizeAiWorkspace(value) {
     value = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-    var mode = ["summary", "explain", "points", "translate", "custom"].indexOf(value.mode) >= 0 ? value.mode : "summary";
+    var mode = ["summary", "explain", "points", "translate", "custom"].indexOf(value.mode) >= 0 ? value.mode : "custom";
     return {
       mode: mode,
       question: String(value.question || "").slice(0, 50000),
       answer: String(value.answer || "").slice(0, 2 * 1024 * 1024)
     };
+  }
+
+  function aiAnswerContainsFormula(value) {
+    var renderer = self.WSBMathRenderer;
+    value = String(value || "");
+    if (!renderer) return false;
+    if (renderer.hasExplicitFormula(value)) return true;
+    return value.split(/\r?\n/).some(function (line) {
+      return !!renderer.legacyFormulaForLine(line);
+    });
+  }
+
+  function renderAiAnswerValue(value) {
+    var source = $("aiAnswer");
+    var preview = $("aiAnswerFormulaPreview");
+    var renderer = self.WSBMathRenderer;
+    var answer = String(value || "");
+    if (source) source.value = answer;
+    if (!preview) return Promise.resolve({ ok: true, formulas: false });
+    var hasFormula = aiAnswerContainsFormula(answer);
+    if (source) {
+      source.hidden = hasFormula;
+      source.setAttribute("aria-hidden", hasFormula ? "true" : "false");
+    }
+    preview.hidden = !hasFormula;
+    preview.setAttribute("aria-hidden", hasFormula ? "false" : "true");
+    if (!renderer) {
+      preview.textContent = hasFormula ? answer : "";
+      return Promise.resolve({ ok: true, formulas: false, fallback: true });
+    }
+    return renderer.render(preview, hasFormula ? answer : "");
   }
 
   function captureActiveAiWorkspace() {
@@ -1409,7 +1684,7 @@
     aiProviderWorkspaces[activeAiProviderId] = workspace;
     $("aiMode").value = workspace.mode;
     $("aiQuestion").value = workspace.question;
-    $("aiAnswer").value = workspace.answer;
+    renderAiAnswerValue(workspace.answer);
   }
 
   function flushAiProviderWorkspaces() {
@@ -1579,6 +1854,7 @@
       if (!res.ok) {
         $("settingsStatus").textContent = text("读取 AI 设置失败：") + (res.error || text("未知错误"));
         aiProviderOptions = normalizeProviderOptions([]);
+        aiTeachingController.setDefaultProvider("deepseek");
         loadAiProviderWorkspaces("deepseek");
         return;
       }
@@ -1590,6 +1866,7 @@
         hasApiKey: typeof res.hasApiKey === "boolean" ? res.hasApiKey : undefined,
         requiresApiKey: typeof res.requiresApiKey === "boolean" ? res.requiresApiKey : undefined
       });
+      aiTeachingController.setDefaultProvider(res.aiProvider);
       loadAiProviderWorkspaces(res.aiProvider);
       updateVideoStatus(res);
     });
@@ -1844,6 +2121,7 @@
     $("goToAiSettingsBtn").addEventListener("click", function () {
       var providerId = normalizeProviderId(dialog.dataset.providerId);
       closeAiUnconfiguredDialog();
+      setAiTeachingMode(false);
       showPanel("settingsPanel", true);
       showProvider(providerId);
     });
@@ -2046,11 +2324,11 @@
     if (status === "starting") $("voiceStatus").textContent = "正在连接当前 Edge 网页的声音...";
     else if (status === "recording") $("voiceStatus").textContent = "正在录制 " + formatVoiceDuration(duration) + " / 01:00，请播放网页中的题目语音。";
     else if (status === "loading") $("voiceStatus").textContent = "正在加载本地 Whisper 模型" + (progress ? " " + progress + "%" : "") + "，首次使用会稍慢。";
-    else if (status === "transcribing") $("voiceStatus").textContent = "正在本地识别网页语音" + (progress ? " " + progress + "%" : "") + "...";
+    else if (status === "transcribing") $("voiceStatus").textContent = "正在本地识别语音问题" + (progress ? " " + progress + "%" : "") + "...";
     else if (status === "completed") $("voiceStatus").textContent = "识别完成，共 " + String($("voiceText").value.trim().length) + " 个字。";
     else if (status === "empty") $("voiceStatus").textContent = "识别完成，但没有识别到文字。请确认网页正在播放声音后重试。";
-    else if (status === "failed") $("voiceStatus").textContent = "网页语音识别失败：" + (state.error || "未知错误");
-    else if (status === "cancelled") $("voiceStatus").textContent = "已取消网页语音获取。";
+    else if (status === "failed") $("voiceStatus").textContent = "语音问题识别失败：" + (state.error || "未知错误");
+    else if (status === "cancelled") $("voiceStatus").textContent = "已取消语音问题获取。";
     else $("voiceStatus").textContent = "点击开始后播放网页声音，最长录制 60 秒。";
 
     if (voiceUiTimer) clearInterval(voiceUiTimer);
@@ -2105,9 +2383,9 @@
 
   function bindOcr() {
     document.querySelectorAll("[data-ocr-view]").forEach(function (button) {
-      button.addEventListener("click", function () { selectOcrView(button.dataset.ocrView); });
+      button.addEventListener("click", function () { selectOcrView(button.dataset.ocrView, true); });
     });
-    selectOcrView("capture");
+    selectOcrView("capture", false);
     $("regionCaptureBtn").addEventListener("click", startRegionCaptureFromPopup);
     $("retryOcrBtn").addEventListener("click", requestBackgroundOcrRetry);
     chrome.storage.onChanged.addListener(function (changes, areaName) {
@@ -2134,7 +2412,7 @@
     $("cancelTabAudioBtn").addEventListener("click", cancelTabAudioCapture);
     $("copyVoiceBtn").addEventListener("click", function () {
       navigator.clipboard.writeText($("voiceText").value || "").then(function () {
-        $("voiceStatus").textContent = "网页语音文字已复制。";
+        $("voiceStatus").textContent = "语音问题文字已复制。";
       }).catch(function (error) {
         $("voiceStatus").textContent = "复制失败：" + (error.message || String(error));
       });
@@ -2142,7 +2420,7 @@
     $("sendVoiceToAiBtn").addEventListener("click", function () {
       var transcript = $("voiceText").value.trim();
       if (!transcript) {
-        $("voiceStatus").textContent = "请先获取网页语音文字。";
+        $("voiceStatus").textContent = "请先获取语音问题文字。";
         return;
       }
       showPanel("aiPanel", true);
@@ -2166,13 +2444,17 @@
     $("askAiBtn").addEventListener("click", function () {
       var pageText = $("ocrText").value.trim() || latestPageText;
       if (pageText) askAi(pageText);
+      else if ($("aiMode").value === "custom" && $("aiQuestion").value.trim()) askAi($("aiQuestion").value);
       else extractPageText().then(askAi);
     });
     $("clearAiHistoryBtn").addEventListener("click", function () {
       aiController.clearHistory();
     });
     ["aiMode", "aiQuestion", "aiAnswer"].forEach(function (id) {
-      $(id).addEventListener(id === "aiMode" ? "change" : "input", scheduleAiProviderWorkspaceSave);
+      $(id).addEventListener(id === "aiMode" ? "change" : "input", function () {
+        if (id === "aiAnswer") renderAiAnswerValue($("aiAnswer").value);
+        scheduleAiProviderWorkspaceSave();
+      });
     });
     window.addEventListener("pagehide", flushAiProviderWorkspaces);
   }
@@ -2282,21 +2564,38 @@
     });
   }
 
+  function selectLogView(view, remember) {
+    view = view === "updates" ? "updates" : "runtime";
+    var currentLogSurface = lastLogView === "updates" ? $("updateLogView") : $("logList");
+    if (currentLogSurface) {
+      panelScrollPositions[lastLogView === "updates" ? "logUpdates" : "logRuntime"] =
+        Math.max(0, Math.round(Number(currentLogSurface.scrollTop || 0)));
+    }
+    var logViewButtons = Array.from(document.querySelectorAll("[data-log-view]"));
+    logViewButtons.forEach(function (button) {
+      var active = button.dataset.logView === view;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    $("runtimeLogView").classList.toggle("hidden", view !== "runtime");
+    $("updateLogView").classList.toggle("hidden", view !== "updates");
+    lastLogView = view;
+    requestAnimationFrame(function () {
+      var target = view === "updates" ? $("updateLogView") : $("logList");
+      if (target) target.scrollTop = Number(panelScrollPositions[view === "updates" ? "logUpdates" : "logRuntime"] || 0);
+    });
+    if (remember === true) {
+      logViewSelectedThisOpen = true;
+      savePopupState();
+    }
+  }
+
   function bindLogs() {
     var logViewButtons = Array.from(document.querySelectorAll("[data-log-view]"));
-    function selectLogView(view) {
-      logViewButtons.forEach(function (button) {
-        var active = button.dataset.logView === view;
-        button.classList.toggle("active", active);
-        button.setAttribute("aria-selected", active ? "true" : "false");
-      });
-      $("runtimeLogView").classList.toggle("hidden", view !== "runtime");
-      $("updateLogView").classList.toggle("hidden", view !== "updates");
-    }
     logViewButtons.forEach(function (button) {
-      button.addEventListener("click", function () { selectLogView(button.dataset.logView); });
+      button.addEventListener("click", function () { selectLogView(button.dataset.logView, true); });
     });
-    selectLogView("runtime");
+    selectLogView("runtime", false);
 
     function setActionStatus(message) {
       $("logActionStatus").textContent = message;
@@ -2324,6 +2623,14 @@
 
     var logList = $("logList");
     var updateLogView = $("updateLogView");
+    function rememberLogScroll(key, element) {
+      var position = Math.max(0, Math.round(Number(element.scrollTop || 0)));
+      if (Number(panelScrollPositions[key] || 0) === position) return;
+      panelScrollPositions[key] = position;
+      schedulePopupScrollSave();
+    }
+    logList.addEventListener("scroll", function () { rememberLogScroll("logRuntime", logList); }, { passive: true });
+    updateLogView.addEventListener("scroll", function () { rememberLogScroll("logUpdates", updateLogView); }, { passive: true });
     logList.addEventListener("wheel", function (event) {
       if (logList.scrollHeight <= logList.clientHeight) return;
       var scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? logList.clientHeight : 1;
@@ -2433,7 +2740,7 @@
   var privacyLabels = {
     screenshots: "截图",
     ocr: "OCR 记录",
-    ai: "AI 历史",
+    ai: "AI 数据",
     logs: "日志",
     scripts: "用户脚本",
     account: "账户数据",
@@ -2476,8 +2783,9 @@
     if (category === "ai" || category === "all") {
       aiProviderWorkspaces = Object.create(null);
       aiController.clearHistory();
+      aiTeachingController.clear();
       $("aiQuestion").value = "";
-      $("aiAnswer").value = "";
+      renderAiAnswerValue("");
       aiProviderWorkspaces[activeAiProviderId] = emptyAiWorkspace();
       scheduleAiProviderWorkspaceSave();
     }
@@ -2559,6 +2867,17 @@
     return meta;
   }
 
+  function addDomPermissionDeclaration(code) {
+    var source = String(code || "");
+    if (/^\s*\/\/\s*@permission\s+dom\s*$/im.test(source)) return source;
+    var endMarker = "// ==/UserScript==";
+    var endIndex = source.indexOf(endMarker);
+    if (endIndex >= 0) {
+      return source.slice(0, endIndex) + "// @permission dom\n" + source.slice(endIndex);
+    }
+    return "// @permission dom\n" + source;
+  }
+
   function normalizeScriptProperty(value) {
     var property = String(value || "").trim();
     if (/^ai$/i.test(property)) return "AI";
@@ -2579,6 +2898,9 @@
     if (permissions.some(function (permission) { return ["dom", "network", "automation"].indexOf(permission) < 0; })) {
       return { ok: false, error: text("\u811a\u672c\u5305\u542b\u4e0d\u652f\u6301\u7684 @permission\uff0c\u5f53\u524d\u4ec5\u652f\u6301 dom\u3001network \u548c automation\u3002") };
     }
+    if (permissions.indexOf("dom") < 0) {
+      return { ok: false, error: text("\u666e\u901a\u7528\u6237\u811a\u672c\u5fc5\u987b\u58f0\u660e @permission dom\u3002network \u548c automation \u53ea\u80fd\u5728 dom \u57fa\u7840\u6743\u9650\u4e0a\u6309\u9700\u53e0\u52a0\u3002") };
+    }
     meta.property = property;
     meta.permissions = permissions.slice().sort();
     return { ok: true, property: property, permissions: meta.permissions };
@@ -2594,12 +2916,13 @@
 
   function permissionDescription(meta) {
     var permissions = Array.isArray(meta && meta.permissions) ? meta.permissions : [];
-    return permissions.map(function (permission) {
-      if (permission === "dom") return "- dom：读取和修改当前网页内容";
-      if (permission === "network") return "- network：发起受网页跨域规则限制的网络请求";
-      if (permission === "automation") return "- automation：允许脚本请求自动翻页和下一条操作";
+    var details = permissions.map(function (permission) {
+      if (permission === "dom") return "- dom：必需的基础权限，读取和修改当前网页 DOM";
+      if (permission === "network") return "- network：允许 fetch、XHR、WebSocket 等主动联网，仍受 CORS 和浏览器安全规则限制";
+      if (permission === "automation") return "- automation：仅解锁兼容工作区内受控的自动翻页和下一条桥接";
       return "- " + permission;
     }).join("\n");
+    return text("dom \u662f\u6240\u6709\u666e\u901a\u7528\u6237\u811a\u672c\u5fc5\u9700\u7684\u57fa\u7840\u6743\u9650\uff1bnetwork \u548c automation \u4ec5\u5728\u58f0\u660e\u540e\u5206\u522b\u89e3\u9501\u3002network \u53ea\u9632\u62a4\u811a\u672c\u76f4\u63a5\u8c03\u7528\u4e3b\u52a8\u8054\u7f51 API\uff0cDOM \u4ecd\u53ef\u89e6\u53d1\u7f51\u9875\u8d44\u6e90\u3001\u5bfc\u822a\u6216\u5411\u4e3b\u73af\u5883\u6ce8\u5165\u4ee3\u7801\uff0c\u8bf7\u53ea\u8fd0\u884c\u53ef\u4fe1\u811a\u672c\u3002\n\n") + details;
   }
 
   function userScriptsEnableInstruction() {
@@ -3071,9 +3394,30 @@
     input.dataset.permissionSignature = "";
     input.placeholder = text("\u9009\u62e9\u672c\u5730 .js \u811a\u672c\u6587\u4ef6");
     if (savedScript && savedScript.code) {
-      var savedMeta = savedScript.meta || parseUserScriptMeta(savedScript.code);
+      var parsedSavedMeta = parseUserScriptMeta(savedScript.code);
+      var savedMeta = savedScript.meta || parsedSavedMeta;
       if (!Array.isArray(savedMeta.permissions) || !savedMeta.permissions.length) {
-        savedMeta.permissions = ["dom"];
+        if (parsedSavedMeta.permissions.length) {
+          if (parsedSavedMeta.permissions.indexOf("dom") < 0) {
+            savedScript.code = addDomPermissionDeclaration(savedScript.code);
+            parsedSavedMeta.permissions.push("dom");
+          }
+          savedMeta.permissions = parsedSavedMeta.permissions.slice();
+        } else {
+          savedScript.code = addDomPermissionDeclaration(savedScript.code);
+          savedMeta.permissions = ["dom"];
+        }
+        savedScript.permissionConfirmed = false;
+        scriptMigrationNeeded = true;
+      }
+      if (Array.isArray(savedMeta.permissions) &&
+          savedMeta.permissions.length &&
+          savedMeta.permissions.indexOf("dom") < 0 &&
+          savedMeta.permissions.every(function (permission) {
+            return ["network", "automation"].indexOf(permission) >= 0;
+          })) {
+        savedScript.code = addDomPermissionDeclaration(savedScript.code);
+        savedMeta.permissions.push("dom");
         savedScript.permissionConfirmed = false;
         scriptMigrationNeeded = true;
       }
@@ -3274,12 +3618,16 @@
     var channel = new MessageChannel();
     var port = channel.port1;
     var parsedMeta = parseUserScriptMeta(script.code);
+    var validation = validateScriptMeta(parsedMeta);
     var declaredSignature = permissionSignature(parsedMeta);
+    var confirmedPermissions = validation.ok &&
+      script.permissionConfirmed === true &&
+      script.permissionSignature === declaredSignature
+      ? parsedMeta.permissions.slice()
+      : [];
     scriptWorkspacePort = port;
     scriptWorkspaceRunId = runId;
-    scriptWorkspaceAutomationAllowed = script.permissionConfirmed === true &&
-      script.permissionSignature === declaredSignature &&
-      parsedMeta.permissions.indexOf("automation") >= 0;
+    scriptWorkspaceAutomationAllowed = confirmedPermissions.indexOf("automation") >= 0;
     port.onmessage = function (event) {
       if (scriptWorkspacePort !== port || scriptWorkspaceRunId !== runId) return;
       var data = event.data;
@@ -3287,7 +3635,11 @@
       if (data.type === "READY") {
         if (scriptWorkspaceReady || Object.keys(data.payload).length) return;
         scriptWorkspaceReady = true;
-        postToScriptWorkspace("RUN_SCRIPT_UI", { name: script.name, code: script.code });
+        postToScriptWorkspace("RUN_SCRIPT_UI", {
+          name: script.name,
+          code: script.code,
+          permissions: confirmedPermissions
+        });
         return;
       }
       if (!scriptWorkspaceReady) return;
@@ -3358,12 +3710,16 @@
   }
 
   bindComprehensiveActionLogging();
+  window.addEventListener("pagehide", function () { savePopupState(); });
   bindPanels();
+  bindScrollSurfaces();
+  bindAiTeachingMode();
   windowModeController.bindPinButton($("pinWindowBtn"));
   bindScriptWorkspaceNav();
   bindVideo();
   bindOcr();
   bindAi();
+  aiTeachingController.bind();
   bindBook();
   bindAccount();
   bindDeclaration();

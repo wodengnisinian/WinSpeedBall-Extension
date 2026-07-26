@@ -13,6 +13,7 @@
     "ai.request",
     "page.read",
     "book.read",
+    "book.control",
     "storage"
   ]);
   var METHOD_CAPABILITIES = Object.freeze({
@@ -24,6 +25,9 @@
     "video.mute": "video.control",
     "video.play": "video.control",
     "video.pause": "video.control",
+    "video.setAutoplay": "video.control",
+    "video.setRateLock": "video.control",
+    "video.reset": "video.control",
     "ocr.latest": "ocr.read",
     "ocr.capture": "ocr.read",
     "ocr.recognize": "ocr.read",
@@ -40,6 +44,11 @@
     "page.title": "page.read",
     "page.url": "page.read",
     "book.getStatus": "book.read",
+    "book.turnPrev": "book.control",
+    "book.turnNext": "book.control",
+    "book.startAuto": "book.control",
+    "book.stopAuto": "book.control",
+    "book.setInterval": "book.control",
     "event.on": "event-specific",
     "storage.get": "storage",
     "storage.set": "storage"
@@ -53,6 +62,9 @@
     "video.mute": "video.mute",
     "video.play": "video.play",
     "video.pause": "video.pause",
+    "video.auto": "video.setAutoplay",
+    "video.lock": "video.setRateLock",
+    "video.reset": "video.reset",
     "ocr.latest": "ocr.latest",
     "ocr.capture": "ocr.capture",
     "ocr.recognize": "ocr.recognize",
@@ -69,6 +81,11 @@
     "page.title": "page.title",
     "page.url": "page.url",
     "book.status": "book.getStatus",
+    "book.prev": "book.turnPrev",
+    "book.next": "book.turnNext",
+    "book.start": "book.startAuto",
+    "book.stop": "book.stopAuto",
+    "book.interval": "book.setInterval",
     "event.on": "event.on",
     "storage.get": "storage.get",
     "storage.set": "storage.set"

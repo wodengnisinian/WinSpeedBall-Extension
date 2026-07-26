@@ -49,7 +49,7 @@
     if (error) return error;
     if (!isObject(payload.command)) return "Control command must be an object.";
     var command = payload.command;
-    var types = ["SET_RATE", "STEP_UP", "STEP_DOWN", "RESET", "SET_MUTED", "TOGGLE_MUTED", "SET_VOLUME", "ENABLE_AUTOPLAY", "DISABLE_AUTOPLAY", "LOCK_STATE", "STOP_LOCK", "PLAY", "PAUSE", "GET_MEDIA_LIST", "GET_STATUS", "EXTRACT_PAGE_TEXT"];
+    var types = ["SET_RATE", "STEP_UP", "STEP_DOWN", "RESET", "SET_MUTED", "TOGGLE_MUTED", "SET_VOLUME", "ENABLE_AUTOPLAY", "DISABLE_AUTOPLAY", "ENABLE_RATE_LOCK", "DISABLE_RATE_LOCK", "LOCK_STATE", "STOP_LOCK", "PLAY", "PAUSE", "GET_MEDIA_LIST", "GET_STATUS", "EXTRACT_PAGE_TEXT"];
     if (types.indexOf(command.type) < 0) return "Unsupported control command.";
     if (command.type === "SET_RATE" && (!isFiniteNumber(command.rate) || command.rate < 0.25 || command.rate > 16)) return "Playback rate is invalid.";
     if (command.type === "SET_VOLUME" && (!isFiniteNumber(command.volume) || command.volume < 0 || command.volume > 1)) return "Volume is invalid.";
@@ -173,24 +173,37 @@
   }
 
   function validateSdkCapabilities(capabilities) {
-    return Array.isArray(capabilities) && capabilities.length > 0 && capabilities.length <= global.WinSpeedBallSdkContracts.CAPABILITIES.length && !capabilities.some(function (capability) {
+    if (!Array.isArray(capabilities) || capabilities.length < 1 || capabilities.length > global.WinSpeedBallSdkContracts.CAPABILITIES.length) return false;
+    var normalized = capabilities.map(function (capability) { return String(capability || "").trim().toLowerCase(); });
+    return new Set(normalized).size === normalized.length && !normalized.some(function (capability) {
       return !global.WinSpeedBallSdkContracts.validCapability(capability);
     });
   }
 
+  function validateSdkBookMode(capabilities, bookMode) {
+    var hasBookCapability = capabilities.some(function (capability) {
+      return String(capability || "").trim().toLowerCase().indexOf("book.") === 0;
+    });
+    if (!hasBookCapability) return bookMode == null ? "" : "Book mode is only valid for book capabilities.";
+    return ["book", "image", "chaoxing"].indexOf(bookMode) >= 0 ? "" : "A valid book authorization mode is required.";
+  }
+
   function validatePrepareSdkContext(payload) {
-    var error = checkKeys(payload, ["capabilities"], ["capabilities"]);
+    var error = checkKeys(payload, ["capabilities", "bookMode"], ["capabilities"]);
     if (error) return error;
-    return validateSdkCapabilities(payload.capabilities) ? "" : "SDK capabilities are invalid.";
+    if (!validateSdkCapabilities(payload.capabilities)) return "SDK capabilities are invalid.";
+    return validateSdkBookMode(payload.capabilities, payload.bookMode);
   }
 
   function validatePrepareSdkSession(payload) {
-    var error = checkKeys(payload, ["scriptId", "code", "capabilities", "contextNonce", "confirmed"], ["scriptId", "code", "capabilities", "contextNonce", "confirmed"]);
+    var error = checkKeys(payload, ["scriptId", "code", "capabilities", "bookMode", "contextNonce", "confirmed"], ["scriptId", "code", "capabilities", "contextNonce", "confirmed"]);
     if (error) return error;
     if (!validSdkScriptId(payload.scriptId)) return "SDK script ID is invalid.";
     if (!validSdkContextNonce(payload.contextNonce)) return "SDK context confirmation is invalid.";
     if (typeof payload.code !== "string" || !payload.code.trim() || payload.code.length > MAX_SCRIPT_LENGTH) return "SDK script code is invalid or too large.";
     if (!validateSdkCapabilities(payload.capabilities)) return "SDK capabilities are invalid.";
+    error = validateSdkBookMode(payload.capabilities, payload.bookMode);
+    if (error) return error;
     return payload.confirmed === true ? "" : "SDK capabilities must be explicitly confirmed.";
   }
 
@@ -292,6 +305,10 @@
     appendPopupLog: { sources: ["popup"], validate: validateLogRecordPayload },
     clearPopupLogs: { sources: ["popup"], validate: noPayload },
     openPinnedWindow: { sources: ["popup"], validate: noPayload },
+    setPinnedWindowTeachingMode: { sources: ["popup"], validate: function (payload) {
+      var error = checkKeys(payload, ["enabled"], ["enabled"]);
+      return error || (typeof payload.enabled === "boolean" ? "" : "Teaching window mode is invalid.");
+    } },
     registerUser: { sources: ["popup"], validate: validateRegister },
     loginUser: { sources: ["popup"], validate: validateLogin },
     logoutUser: { sources: ["popup"], validate: noPayload },
@@ -317,9 +334,10 @@
     getActiveSiteAccess: { sources: ["popup"], validate: noPayload },
     showAiReplyWindow: { sources: ["popup"], validate: function (payload) {
       var boundsKeys = ["screenLeft", "screenTop", "screenWidth", "screenHeight"];
-      var error = checkKeys(payload, ["content", "windowLeft", "windowTop", "windowWidth", "windowHeight"].concat(boundsKeys), ["content", "windowLeft", "windowTop", "windowWidth", "windowHeight"]);
+      var error = checkKeys(payload, ["content", "truncated", "windowLeft", "windowTop", "windowWidth", "windowHeight"].concat(boundsKeys), ["content", "windowLeft", "windowTop", "windowWidth", "windowHeight"]);
       if (error) return error;
       if (typeof payload.content !== "string" || !payload.content.trim() || payload.content.length > 2 * 1024 * 1024) return "AI reply is invalid or too large.";
+      if (payload.truncated != null && typeof payload.truncated !== "boolean") return "AI reply truncation state is invalid.";
       if (![payload.windowLeft, payload.windowTop, payload.windowWidth, payload.windowHeight].every(isFiniteNumber)) return "AI reply window bounds are invalid.";
       if (payload.windowWidth < 100 || payload.windowWidth > 2000 || payload.windowHeight < 100 || payload.windowHeight > 2000) return "AI reply window size is invalid.";
       var suppliedScreenBounds = boundsKeys.filter(function (key) { return Object.prototype.hasOwnProperty.call(payload, key); });
@@ -333,7 +351,11 @@
       if (error) return error;
       if (typeof payload.scriptId !== "string" || !/^[a-zA-Z0-9_-]{1,64}$/.test(payload.scriptId)) return "User script ID is invalid.";
       if (typeof payload.code !== "string" || payload.code.length > MAX_SCRIPT_LENGTH) return "User script is invalid or too large.";
-      if (!Array.isArray(payload.permissions) || !payload.permissions.length || payload.permissions.some(function (permission) { return ["dom", "network", "automation"].indexOf(permission) < 0; })) return "User script permissions are invalid.";
+      if (!Array.isArray(payload.permissions) ||
+          payload.permissions.indexOf("dom") < 0 ||
+          payload.permissions.some(function (permission, index, list) {
+            return ["dom", "network", "automation"].indexOf(permission) < 0 || list.indexOf(permission) !== index;
+          })) return "User script permissions are invalid.";
       return payload.permissionConfirmed === true ? "" : "User script permissions are not confirmed.";
     } },
     getUserScriptsStatus: { sources: ["popup"], validate: noPayload },
@@ -341,6 +363,7 @@
     bookPanel: { sources: ["popup"], validate: validateBookAutomation },
     testAI: { sources: ["popup"], validate: noPayload },
     askAI: { sources: ["popup"], validate: validateAi },
+    askAiTeaching: { sources: ["popup"], validate: validateAi },
     testDeepSeek: { sources: ["popup"], validate: noPayload },
     askDeepSeek: { sources: ["popup"], validate: validateAi },
     syncUserScripts: { sources: ["popup"], validate: noPayload },

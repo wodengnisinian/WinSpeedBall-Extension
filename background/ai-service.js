@@ -131,14 +131,15 @@
 
   function normalizeReply(result) {
     if (!result || result.ok !== true) return result;
-    var normalizer = global.WinSpeedBallTextNormalizer;
-    if (!normalizer || typeof normalizer.normalize !== "function") return result;
-    var content = normalizer.normalize(result.content || "");
+    var normalizer = global.WinSpeedBallStructuredTextNormalizer;
+    var content = normalizer && typeof normalizer.normalize === "function"
+      ? normalizer.normalize(result.content || "")
+      : String(result.content || "").trim();
     if (!content) {
       return Object.assign({}, result, {
         ok: false,
         code: "EMPTY_SUPPORTED_TEXT",
-        error: "AI 回复中没有可显示的中文或英文内容。",
+        error: "AI 回复中没有可显示的内容。",
         retryable: false
       });
     }

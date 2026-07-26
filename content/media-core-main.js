@@ -1,9 +1,9 @@
 (function (global) {
   "use strict";
 
-  var VERSION = "2026-07-13-main-media-core-v6";
+  var VERSION = "2026-07-26-main-media-core-v7";
   var SESSION_STATE_KEY = "__winspeedball_media_state_v6";
-  if (global.WinSpeedBallMediaCoreV6 && global.WinSpeedBallMediaCoreV6.version === VERSION) return;
+  if (global.WinSpeedBallMediaCoreV7 && global.WinSpeedBallMediaCoreV7.version === VERSION) return;
   if (!global.HTMLMediaElement || !global.document) return;
 
   var mediaPrototype = global.HTMLMediaElement.prototype;
@@ -904,9 +904,31 @@
         state.controlMode = state.lockRequested ? "lock" : state.rateLocked ? "apply" : "stopped";
         stopIntegrityLoopIfIdle();
         return buildState(collectMedia(), 0);
+      case "ENABLE_RATE_LOCK":
+        state.rateLocked = true;
+        state.externalRateMasked = siteProfile().id === "chaoxing";
+        state.controlMode = state.lockRequested ? "lock" : "apply";
+        if (state.continuousPlayback) persistContinuousState();
+        applied = synchronizeAll();
+        startRateDefense(5000);
+        startIntegrityLoop();
+        return buildState(collectMedia(), applied);
+      case "DISABLE_RATE_LOCK":
+        state.lockRequested = false;
+        state.rateLocked = false;
+        state.externalRateMasked = false;
+        state.transientLockUntil = 0;
+        state.controlMode = state.continuousPlayback ? "apply" : "stopped";
+        if (state.continuousPlayback) persistContinuousState();
+        stopRateDefense();
+        stopIntegrityLoopIfIdle();
+        return buildState(collectMedia(), 0);
       case "LOCK_STATE":
         state.lockRequested = true;
+        state.rateLocked = true;
+        state.externalRateMasked = siteProfile().id === "chaoxing";
         state.controlMode = "lock";
+        if (state.continuousPlayback) persistContinuousState();
         applied = synchronizeAll();
         startRateDefense(5000);
         startIntegrityLoop();
@@ -1039,7 +1061,7 @@
       });
     }
   });
-  nativeObjectDefineProperty.call(Object, global, "WinSpeedBallMediaCoreV6", {
+  nativeObjectDefineProperty.call(Object, global, "WinSpeedBallMediaCoreV7", {
     configurable: false,
     enumerable: false,
     writable: false,

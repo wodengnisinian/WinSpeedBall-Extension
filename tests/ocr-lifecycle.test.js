@@ -43,10 +43,10 @@ function buildService(options = {}) {
   const context = {
     self: {
       WinSpeedBallStorageService: storage,
-      WinSpeedBallTextNormalizer: {
+      WinSpeedBallStructuredTextNormalizer: {
         normalize(value) {
-          return typeof options.normalizeText === "function"
-            ? options.normalizeText(String(value || ""))
+          return typeof options.normalizeStructuredText === "function"
+            ? options.normalizeStructuredText(String(value || ""))
             : String(value || "").trim();
         }
       },
@@ -101,15 +101,15 @@ test("OCR 完成或失败后关闭空闲离屏文档", async () => {
   assert.equal(failed.getCloseCount(), 1);
 });
 
-test("OCR 结果在保存和显示前统一执行中英文正规化", async () => {
+test("OCR 结果在保存和显示前保留题目公式与格式", async () => {
   const fixture = buildService({
-    normalizeText(value) {
-      return value.replace(/繁體/g, "繁体").replace(/題/g, "题").replace(/韓文/g, "").trim();
+    normalizeStructuredText(value) {
+      return value.replace(/\u0000/g, "").trim();
     }
   });
-  fixture.service.handleComplete({ sourceTime: 100, text: "繁體題目 韓文" });
+  fixture.service.handleComplete({ sourceTime: 100, text: "\u0000繁體題目：\\(x_1^2\\)\nA. 1 | B. 2" });
   await flush();
-  assert.equal(fixture.data.manualOcrText, "繁体题目");
+  assert.equal(fixture.data.manualOcrText, "繁體題目：\\(x_1^2\\)\nA. 1 | B. 2");
 });
 
 test("隐私清理取消 OCR 后迟到结果不能回写", async () => {

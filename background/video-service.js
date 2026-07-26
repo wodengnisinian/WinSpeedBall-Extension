@@ -15,6 +15,168 @@
       return { rate: currentRate, muted: currentMuted, volume: currentVolume };
     }
 
+    function originPatternFromUrl(url) {
+      try {
+        var parsed = new URL(String(url || ""));
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+        return parsed.protocol + "//" + parsed.hostname + "/*";
+      } catch (error) {
+        return "";
+      }
+    }
+
+    function originFromUrl(url) {
+      try {
+        var parsed = new URL(String(url || ""));
+        return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.origin : "";
+      } catch (error) {
+        return "";
+      }
+    }
+
+    function contextChanged(error) {
+      return {
+        ok: false,
+        code: "SDK_CONTEXT_CHANGED",
+        error: String(error || "The authorized page changed before the SDK operation could run."),
+        mediaCount: 0,
+        applied: 0,
+        frameCount: 0,
+        frameResults: []
+      };
+    }
+
+    function validateBoundContext(tabId, boundContext, callback) {
+      if (!boundContext) {
+        callback(null);
+        return;
+      }
+      var expectedOrigin = String(boundContext.origin || "");
+      var expectedPattern = String(boundContext.originPattern || "");
+      if (!expectedOrigin || !expectedPattern) {
+        callback(contextChanged("The SDK page binding is incomplete."));
+        return;
+      }
+      try {
+        chrome.tabs.get(tabId, function (tab) {
+          var tabError = lastErrorMessage();
+          var actualOrigin = tab && originFromUrl(tab.url || "");
+          var actualPattern = tab && originPatternFromUrl(tab.url || "");
+          if (tabError || !tab || actualOrigin !== expectedOrigin || actualPattern !== expectedPattern) {
+            callback(contextChanged(tabError || "The authorized page navigated to another origin or closed."));
+            return;
+          }
+          callback(null);
+        });
+      } catch (error) {
+        callback(contextChanged(error && error.message || String(error)));
+      }
+    }
+
+    function bindSdkDocumentTarget(tabId, details, boundContext, callback) {
+      if (!boundContext) {
+        callback(details, null);
+        return;
+      }
+      if (!chrome.webNavigation || typeof chrome.webNavigation.getAllFrames !== "function") {
+        callback(null, contextChanged("Browser document binding is unavailable."));
+        return;
+      }
+      validateBoundContext(tabId, boundContext, function (contextFailure) {
+        if (contextFailure) {
+          callback(null, contextFailure);
+          return;
+        }
+        try {
+          chrome.webNavigation.getAllFrames({ tabId: tabId }, function (frames) {
+            var frameError = lastErrorMessage();
+            var list = Array.isArray(frames) ? frames : [];
+            var topFrame = list.find(function (frame) { return frame && frame.frameId === 0; });
+            var topOrigin = topFrame && originFromUrl(topFrame.url || "");
+            var topPattern = topFrame && originPatternFromUrl(topFrame.url || "");
+            if (frameError || !topFrame
+                || topOrigin !== String(boundContext.origin || "")
+                || topPattern !== String(boundContext.originPattern || "")) {
+              callback(null, contextChanged(frameError || "The authorized document changed before the SDK operation could run."));
+              return;
+            }
+
+            var requestedTarget = details && details.target || {};
+            var requestedFrameIds = Array.isArray(requestedTarget.frameIds) ? requestedTarget.frameIds.map(Number) : null;
+            var selected = requestedTarget.allFrames === true
+              ? list.slice()
+              : (requestedFrameIds
+                ? requestedFrameIds.map(function (frameId) {
+                  return list.find(function (frame) { return frame && frame.frameId === frameId; }) || null;
+                })
+                : [topFrame]);
+            if (!selected.length || selected.some(function (frame) {
+              return !frame || typeof frame.documentId !== "string" || !frame.documentId;
+            })) {
+              callback(null, contextChanged("The authorized document could not be bound safely."));
+              return;
+            }
+            var documentIds = selected.map(function (frame) { return frame.documentId; }).filter(function (documentId, index, values) {
+              return values.indexOf(documentId) === index;
+            });
+            if (!documentIds.length) {
+              callback(null, contextChanged("The authorized document could not be bound safely."));
+              return;
+            }
+            callback(Object.assign({}, details, {
+              target: { tabId: tabId, documentIds: documentIds }
+            }), null);
+          });
+        } catch (error) {
+          callback(null, contextChanged(error && error.message || String(error)));
+        }
+      });
+    }
+
+    function executeScriptInBoundContext(tabId, details, boundContext, callback) {
+      function execute(boundDetails) {
+        try {
+          chrome.scripting.executeScript(boundDetails, function (results) {
+            var executeError = lastErrorMessage();
+            if (!boundContext) {
+              callback(results, null);
+              return;
+            }
+            if (executeError) {
+              validateBoundContext(tabId, boundContext, function (contextFailure) {
+                callback([], contextFailure || {
+                  ok: false,
+                  error: executeError,
+                  mediaCount: 0,
+                  applied: 0,
+                  frameCount: 0,
+                  frameResults: []
+                });
+              });
+              return;
+            }
+            validateBoundContext(tabId, boundContext, function (contextFailure) {
+              callback(contextFailure ? [] : results, contextFailure);
+            });
+          });
+        } catch (error) {
+          callback([], {
+            ok: false,
+            error: error && error.message || String(error),
+            mediaCount: 0,
+            applied: 0,
+            frameCount: 0,
+            frameResults: []
+          });
+        }
+      }
+
+      bindSdkDocumentTarget(tabId, details, boundContext, function (boundDetails, contextFailure) {
+        if (contextFailure) callback([], contextFailure);
+        else execute(boundDetails);
+      });
+    }
+
     function hydrate(callback) {
       storage.get(["rate", "muted", "volume"], function (data) {
         if (data.rate != null) currentRate = data.rate;
@@ -114,9 +276,9 @@
       return output;
     }
 
-    function sendIsolatedCommandToAllFrames(tabId, command, callback) {
+    function sendIsolatedCommandToAllFrames(tabId, command, callback, boundContext) {
       function executeCommand(done) {
-        chrome.scripting.executeScript({
+        executeScriptInBoundContext(tabId, {
           target: { tabId: tabId, allFrames: true },
           world: "ISOLATED",
           func: function (cmd) {
@@ -126,11 +288,15 @@
             return { ok: false, error: "content script not loaded", url: location.href, mediaCount: 0, applied: 0 };
           },
           args: [command]
-        }, done);
+        }, boundContext, done);
       }
 
       try {
-        executeCommand(function (results) {
+        executeCommand(function (results, contextFailure) {
+          if (contextFailure) {
+            callback(contextFailure);
+            return;
+          }
           var error = lastErrorMessage();
           if (error) {
             callback(Object.assign({ ok: false, error: error, mediaCount: 0, applied: 0, frameCount: 0, frameResults: [] }, getState()));
@@ -144,22 +310,34 @@
             return;
           }
 
-          chrome.scripting.executeScript({
+          executeScriptInBoundContext(tabId, {
             target: { tabId: tabId, allFrames: true },
             files: ["content/shadow-hook.js"],
             world: "MAIN"
-          }, function () {
+          }, boundContext, function (shadowResults, shadowContextFailure) {
+            if (shadowContextFailure) {
+              callback(shadowContextFailure);
+              return;
+            }
             lastErrorMessage();
-            chrome.scripting.executeScript({
+            executeScriptInBoundContext(tabId, {
               target: { tabId: tabId, allFrames: true },
               files: ["content/player-adapters.js", "content/index.js"]
-            }, function () {
+            }, boundContext, function (injectResults, injectContextFailure) {
+              if (injectContextFailure) {
+                callback(injectContextFailure);
+                return;
+              }
               var injectError = lastErrorMessage();
               if (injectError) {
                 callback({ ok: false, error: injectError, mediaCount: 0, applied: 0, frameResults: [] });
                 return;
               }
-              executeCommand(function (retryResults) {
+              executeCommand(function (retryResults, retryContextFailure) {
+                if (retryContextFailure) {
+                  callback(retryContextFailure);
+                  return;
+                }
                 var retryError = lastErrorMessage();
                 if (retryError) callback({ ok: false, error: retryError, mediaCount: 0, applied: 0, frameResults: [] });
                 else callback(aggregateFrameResults(retryResults || [], command));
@@ -179,22 +357,26 @@
       }
     }
 
-    function sendMainWorldCommandToAllFrames(tabId, command, callback) {
+    function sendMainWorldCommandToAllFrames(tabId, command, callback, boundContext) {
       function executeCommand(done) {
-        chrome.scripting.executeScript({
+        executeScriptInBoundContext(tabId, {
           target: { tabId: tabId, allFrames: true },
           world: "MAIN",
           func: function (cmd) {
-            if (window.WinSpeedBallMediaCoreV6 && typeof window.WinSpeedBallMediaCoreV6.handleCommand === "function") {
-              return window.WinSpeedBallMediaCoreV6.handleCommand(cmd);
+            if (window.WinSpeedBallMediaCoreV7 && typeof window.WinSpeedBallMediaCoreV7.handleCommand === "function") {
+              return window.WinSpeedBallMediaCoreV7.handleCommand(cmd);
             }
             return { ok: false, error: "main media core upgrade required", url: location.href, mediaCount: 0, applied: 0 };
           },
           args: [command]
-        }, done);
+        }, boundContext, done);
       }
 
-      function finish(results) {
+      function finish(results, contextFailure) {
+        if (contextFailure) {
+          callback(contextFailure);
+          return;
+        }
         var error = lastErrorMessage();
         if (error) {
           callback(Object.assign({ ok: false, error: error, mediaCount: 0, applied: 0, frameCount: 0, frameResults: [] }, getState()));
@@ -204,7 +386,11 @@
       }
 
       try {
-        executeCommand(function (results) {
+        executeCommand(function (results, contextFailure) {
+          if (contextFailure) {
+            callback(contextFailure);
+            return;
+          }
           var error = lastErrorMessage();
           if (error) {
             callback(Object.assign({ ok: false, error: error, mediaCount: 0, applied: 0, frameCount: 0, frameResults: [] }, getState()));
@@ -217,23 +403,31 @@
             finish(results);
             return;
           }
-          chrome.scripting.executeScript({
+          executeScriptInBoundContext(tabId, {
             target: { tabId: tabId, allFrames: true },
             world: "MAIN",
             func: function () {
-              var legacy = window.WinSpeedBallMediaCoreV5 || window.WinSpeedBallMediaCoreV4 || window.WinSpeedBallMediaCoreV3 || window.WinSpeedBallMediaCore;
-              if (!window.WinSpeedBallMediaCoreV6 && legacy && typeof legacy.handleCommand === "function") {
+              var legacy = window.WinSpeedBallMediaCoreV6 || window.WinSpeedBallMediaCoreV5 || window.WinSpeedBallMediaCoreV4 || window.WinSpeedBallMediaCoreV3 || window.WinSpeedBallMediaCore;
+              if (!window.WinSpeedBallMediaCoreV7 && legacy && typeof legacy.handleCommand === "function") {
                 try { legacy.handleCommand({ type: "STOP_LOCK" }); } catch (error) {}
               }
               return true;
             }
-          }, function () {
+          }, boundContext, function (legacyResults, legacyContextFailure) {
+            if (legacyContextFailure) {
+              callback(legacyContextFailure);
+              return;
+            }
             lastErrorMessage();
-            chrome.scripting.executeScript({
+            executeScriptInBoundContext(tabId, {
               target: { tabId: tabId, allFrames: true },
               world: "MAIN",
               files: ["content/shadow-hook.js", "content/media-core-main.js"]
-            }, function () {
+            }, boundContext, function (injectResults, injectContextFailure) {
+              if (injectContextFailure) {
+                callback(injectContextFailure);
+                return;
+              }
               var injectError = lastErrorMessage();
               if (injectError) {
                 callback({ ok: false, error: injectError, mediaCount: 0, applied: 0, frameCount: 0, frameResults: [] });
@@ -255,19 +449,19 @@
       }
     }
 
-    function sendCommandToAllFrames(tabId, command, callback) {
+    function sendCommandToAllFrames(tabId, command, callback, boundContext) {
       if (command && command.type === "EXTRACT_PAGE_TEXT") {
-        sendIsolatedCommandToAllFrames(tabId, command, callback);
+        sendIsolatedCommandToAllFrames(tabId, command, callback, boundContext);
         return;
       }
-      sendMainWorldCommandToAllFrames(tabId, command, callback);
+      sendMainWorldCommandToAllFrames(tabId, command, callback, boundContext);
     }
 
-    function controlTab(tabId, command, callback) {
+    function controlTab(tabId, command, callback, boundContext) {
       command = command || { type: "GET_STATUS" };
       var rateCommand = ["SET_RATE", "STEP_UP", "STEP_DOWN"].indexOf(command.type) >= 0;
       if (!rateCommand) {
-        sendCommandToAllFrames(tabId, command, callback);
+        sendCommandToAllFrames(tabId, command, callback, boundContext);
         return;
       }
       sendCommandToAllFrames(tabId, command, function (initial) {
@@ -278,6 +472,10 @@
         var expectedRate = Number(command.type === "SET_RATE" ? command.rate : initial.targetRate || initial.rate);
         setTimeout(function () {
           sendCommandToAllFrames(tabId, { type: "GET_STATUS" }, function (verified) {
+            if (verified && verified.code === "SDK_CONTEXT_CHANGED") {
+              callback(verified);
+              return;
+            }
             verified = verified || { ok: false, mediaCount: 0 };
             var measuredRate = Number(verified.rate || 0);
             var rateStable = verified.ok && verified.mediaCount > 0 && verified.rateLocked === true && verified.rateStable !== false &&
@@ -294,9 +492,9 @@
                 : "延迟校验时未检测到可控制的视频。";
             }
             callback(result);
-          });
+          }, boundContext);
         }, 700);
-      });
+      }, boundContext);
     }
 
     return {

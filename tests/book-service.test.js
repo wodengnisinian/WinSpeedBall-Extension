@@ -33,11 +33,13 @@ function element(options = {}) {
 }
 
 function createFixture(url) {
-  const previous = element({ text: "上一页" });
-  const next = element({ text: "下一页" });
-  const reader = element({ className: "book-reader", width: 800, height: 600 });
-  const body = element({ width: 1024, height: 768 });
-  const documentElement = element({ width: 1024, height: 768 });
+  function HTMLElement() {}
+  HTMLElement.prototype.click = function () { this.clicked += 1; };
+  const previous = Object.assign(new HTMLElement(), element({ text: "上一页" }));
+  const next = Object.assign(new HTMLElement(), element({ text: "下一页" }));
+  const reader = Object.assign(new HTMLElement(), element({ className: "book-reader", width: 800, height: 600 }));
+  const body = Object.assign(new HTMLElement(), element({ width: 1024, height: 768 }));
+  const documentElement = Object.assign(new HTMLElement(), element({ width: 1024, height: 768 }));
   const document = {
     title: "学习通图书",
     body,
@@ -58,6 +60,7 @@ function createFixture(url) {
     location: { href: url },
     getComputedStyle() { return { display: "block", visibility: "visible", opacity: "1" }; },
     KeyboardEvent: function KeyboardEvent(type, init) { this.type = type; Object.assign(this, init); },
+    HTMLElement,
     URL,
     Object,
     Array,
@@ -71,17 +74,17 @@ function createFixture(url) {
   return { service: context.self.WinSpeedBallBookService, context, previous, next };
 }
 
-test("学习通 SSLibrary 图书框架可以被识别并只点击目标翻页按钮", () => {
+test("SSLibrary 图书框架可以被普通图书模式识别并只点击目标翻页按钮", () => {
   const fixture = createFixture("https://epub.sslibrary.com/epub/reader?gcebook=1");
   const detection = fixture.service.runInFrame("DETECT");
   assert.equal(detection.ok, true);
-  assert.equal(detection.reader, "chaoxing-book");
+  assert.equal(detection.reader, "web-book");
   assert.equal(detection.canPrev, true);
   assert.equal(detection.canNext, true);
 
   const result = fixture.service.runInFrame("NEXT");
   assert.equal(result.ok, true);
-  assert.equal(result.method, "button");
+  assert.equal(result.method, "browser-native-click");
   assert.equal(result.selector, "#next-page-js");
   assert.equal(fixture.next.clicked, 1);
   assert.equal(fixture.previous.clicked, 0);
@@ -136,7 +139,7 @@ test("MAIN 图书核心使用浏览器原生方法控制 SSLibrary 翻页", () =
   assert.equal(previous.clicked, 0);
 });
 
-test("MAIN 图书核心直接调用旧版超星 JPath Readweb 原生翻页接口", () => {
+test("普通图书和图片模式不会识别旧版超星 JPath Readweb", () => {
   function HTMLElement() {}
   HTMLElement.prototype.click = function () { this.clicked += 1; };
   function EventTarget() {}
@@ -177,23 +180,14 @@ test("MAIN 图书核心直接调用旧版超星 JPath Readweb 原生翻页接口
   vm.createContext(context);
   vm.runInContext(read("content/book-core-main.js"), context);
 
-  const detection = window.WinSpeedBallBookCoreV6.handleCommand("DETECT");
-  assert.equal(detection.ok, true);
-  assert.equal(detection.reader, "chaoxing-book");
-  assert.equal(detection.readerEngine, "jpath-readweb");
-  assert.equal(detection.canPrev, true);
-  assert.equal(detection.canNext, true);
-
-  const nextResult = window.WinSpeedBallBookCoreV6.handleCommand("NEXT");
-  assert.equal(nextResult.ok, true);
-  assert.equal(nextResult.method, "jpath-native-controller");
-  assert.equal(nextResult.verified, true);
-  assert.equal(nextResult.page, "2");
-  assert.equal(state.page, 2);
-
-  const previousResult = window.WinSpeedBallBookCoreV6.handleCommand("PREV");
-  assert.equal(previousResult.ok, true);
-  assert.equal(previousResult.method, "jpath-native-controller");
+  const bookDetection = window.WinSpeedBallBookCoreV6.handleCommand({ type: "DETECT", mode: "book" });
+  const imageDetection = window.WinSpeedBallBookCoreV6.handleCommand({ type: "DETECT", mode: "image" });
+  assert.equal(bookDetection.ok, false);
+  assert.equal(bookDetection.reader, "");
+  assert.equal(bookDetection.jpathControllerReady, false);
+  assert.equal(imageDetection.ok, false);
+  assert.equal(imageDetection.reader, "");
+  assert.equal(imageDetection.jpathControllerReady, false);
   assert.equal(state.page, 1);
 });
 
@@ -263,6 +257,11 @@ test("学习通版本严格识别 PDG/JPath 图像书并跨页类型调用原生
   vm.createContext(context);
   vm.runInContext(read("content/book-core-main.js"), context);
 
+  const regularBookDetection = window.WinSpeedBallBookCoreV6.handleCommand({ type: "DETECT", mode: "book" });
+  const regularImageDetection = window.WinSpeedBallBookCoreV6.handleCommand({ type: "DETECT", mode: "image" });
+  assert.equal(regularBookDetection.ok, false);
+  assert.equal(regularImageDetection.ok, false);
+
   const detection = window.WinSpeedBallBookCoreV6.handleCommand({ type: "DETECT", mode: "chaoxing" });
   assert.equal(detection.ok, true);
   assert.equal(detection.reader, "chaoxing-pdg");
@@ -297,7 +296,7 @@ test("学习通版本严格识别 PDG/JPath 图像书并跨页类型调用原生
   assert.deepEqual(gotoCalls, [[1, 5]]);
 });
 
-test("MAIN JPath fallback forces the source image node when goto does not change the page", () => {
+test("学习通 goto 无响应时恢复使用 JPath 页面节点切换兜底", () => {
   function HTMLElement() {}
   HTMLElement.prototype.click = function () {};
   function EventTarget() {}
@@ -324,11 +323,12 @@ test("MAIN JPath fallback forces the source image node when goto does not change
     zm: 0,
     onchangepage(page, type) { window.cpageInfo = { cpage: page, pageType: type }; }
   };
+  let gotoCalls = 0;
   const readweb = {
     getPrarm() { return params; },
     page() { return params.page; },
     currentJimg() { return { jimg: [image1] }; },
-    goto() {},
+    goto() { gotoCalls += 1; },
     nextPage() {},
     prevPage() {}
   };
@@ -361,14 +361,11 @@ test("MAIN JPath fallback forces the source image node when goto does not change
   vm.createContext(context);
   vm.runInContext(read("content/book-core-main.js"), context);
 
-  const result = window.WinSpeedBallBookCoreV6.handleCommand({ type: "NEXT", mode: "book" });
-  assert.equal(result.ok, true);
-  assert.equal(result.method, "jpath-dom-force");
-  assert.equal(result.page, "2");
-  assert.equal(result.verified, true);
-  assert.equal(page1.style.display, "none");
-  assert.equal(page2.style.display, "block");
-  assert.match(image2.getAttribute("src"), /\/reader\/000002\?\.&uf=ssr&zoom=0/);
+  const regularResult = window.WinSpeedBallBookCoreV6.handleCommand({ type: "NEXT", mode: "book" });
+  assert.equal(regularResult.ok, false);
+  assert.equal(regularResult.error, "BOOK_READER_NOT_FOUND");
+  assert.equal(page1.style.display, "block");
+  assert.equal(page2.style.display, "none");
 
   params.page = 1;
   params.t = 5;
@@ -381,10 +378,19 @@ test("MAIN JPath fallback forces the source image node when goto does not change
   assert.equal(chaoxingResult.method, "chaoxing-pdg-force");
   assert.equal(chaoxingResult.page, "2");
   assert.equal(chaoxingResult.pageTypeLabel, "正文页");
+  assert.equal(gotoCalls, 1);
+  assert.equal(params.page, 2);
+  assert.equal(params.t, 5);
+  assert.equal(page1.style.display, "none");
+  assert.equal(page2.style.display, "block");
+  assert.equal(page3.style.display, "none");
+  assert.notEqual(image2.getAttribute("src"), "/images/dot.gif");
+
   const consecutiveResult = window.WinSpeedBallBookCoreV6.handleCommand({ type: "NEXT", mode: "chaoxing" });
   assert.equal(consecutiveResult.ok, true);
   assert.equal(consecutiveResult.method, "chaoxing-pdg-force");
   assert.equal(consecutiveResult.page, "3");
+  assert.equal(gotoCalls, 2);
   assert.equal(page2.style.display, "none");
   assert.equal(page3.style.display, "block");
 });
@@ -407,16 +413,16 @@ test("MAIN image mode scrolls the actual image sequence and verifies movement", 
     body,
     documentElement: body,
     activeElement: body,
-    querySelector(selector) { return selector === "#Readweb" ? container : null; },
+    querySelector() { return null; },
     querySelectorAll(selector) {
-      if (selector === "#Readweb" || selector === ".duxiuimg") return [container];
-      if (selector === "#Readweb .duxiuimg") return pages;
+      if (selector === ".reader") return [container];
+      if (selector === ".reader-page[data-page]") return pages;
       return [];
     }
   };
   const window = {
     document,
-    location: { href: "https://readsvr.chaoxing.com/n/moocreadsvr/read?ssid=1" },
+    location: { href: "https://example.test/image-reader" },
     innerHeight: 545,
     scrollY: 0,
     HTMLElement,
@@ -435,7 +441,7 @@ test("MAIN image mode scrolls the actual image sequence and verifies movement", 
 
   const result = window.WinSpeedBallBookCoreV6.handleCommand({ type: "NEXT", mode: "image" });
   assert.equal(result.ok, true);
-  assert.equal(result.method, "image-native-scroll");
+  assert.equal(result.method, "browser-native-scroll");
   assert.equal(result.verified, true);
   assert.equal(result.imageIndex, 2);
   assert.equal(container.scrollTop, 956);
@@ -486,8 +492,8 @@ test("多框架扫描优先选择评分最高的内嵌阅读器", () => {
   const fixture = createFixture("https://example.test/book");
   const selected = fixture.service.selectFrame([
     { frameId: 0, result: { detected: false, score: -100 } },
-    { frameId: 4, result: { detected: true, score: 60, canNext: true, keyboardReady: true } },
-    { frameId: 9, result: { detected: true, score: 130, canNext: true, keyboardReady: true } }
+    { frameId: 4, result: { detected: true, score: 60, canNext: true } },
+    { frameId: 9, result: { detected: true, score: 130, canNext: true } }
   ], "NEXT");
   assert.equal(selected.frameId, 9);
 });
@@ -499,6 +505,7 @@ test("图书控制先扫描全部框架再只控制选中的框架", () => {
   const html = read("popup/index.html");
   const schema = read("background/message-schema.js");
   const manifest = read("manifest.json");
+  const core = read("content/book-core-main.js");
 
   assert.match(background, /importScripts\("book-service\.js"\)/);
   assert.match(background, /callMainWorldBookCore\(\{ tabId: tab\.id, allFrames: true \}, \{ type: "DETECT", mode: mode \}/);
@@ -506,6 +513,12 @@ test("图书控制先扫描全部框架再只控制选中的框架", () => {
   assert.match(background, /world: "MAIN"/);
   assert.match(background, /files: \["content\/book-core-main\.js"\]/);
   assert.match(background, /window\.WinSpeedBallBookCoreV7\.handleCommand/);
+  assert.match(core, /nativeClick\.call\(element\)/);
+  assert.match(core, /nativeScrollIntoView\.call\(element/);
+  assert.match(core, /controller\.goto\.call\(controller, targetCoordinate\.page, targetCoordinate\.type\)/);
+  assert.match(core, /function forceJpathDomTurn\(direction, result\)/);
+  assert.match(core, /if \(mode === "chaoxing"\)[\s\S]*?invokeChaoxingPdgController\(direction, result\) \|\| forceJpathDomTurn\(direction, result\)/);
+  assert.doesNotMatch(core, /global\.jQuery|new NativeKeyboardEvent/);
   assert.match(background, /CHAOXING_BACK_COVER_CHECK_DELAYS_SECONDS = \[400, 300, 250, 150, 50\]/);
   assert.match(background, /BOOK_BACK_COVER_ALARM = "book-panel-chaoxing-back-cover-check"/);
   assert.match(background, /runBookTurn\("DETECT", bookState\.tabId, bookState\.originPattern, "chaoxing"/);
@@ -514,9 +527,11 @@ test("图书控制先扫描全部框架再只控制选中的框架", () => {
   assert.match(popup, /function renderBookBackCoverMonitor\(\)/);
   assert.match(popup, /changes\.bookPanelState/);
   assert.match(background, /bookService\.selectFrame\(results, direction\)/);
-  assert.match(client, /function discoverBookFrameOrigins\(tabId, currentOriginPattern\)/);
+  assert.match(client, /function discoverBookFrameOrigins\(tabId, currentOriginPattern, mode\)/);
   assert.match(client, /chrome\.webNavigation\.getAllFrames\(\{ tabId: tabId \}/);
-  assert.match(client, /function ensureBookAccess\(site\)/);
+  assert.match(client, /function ensureBookAccess\(site, mode\)/);
+  assert.match(client, /mode !== "chaoxing" && \/chaoxing/);
+  assert.match(client, /普通图书和图片模式不会读取学习通内容/);
   assert.match(client, /target: \{ tabId: tabId, allFrames: true \}/);
   assert.match(client, /frame\.getAttribute\("module"\)/);
   assert.match(client, /parsed && parsed\.readurl/);
@@ -526,14 +541,16 @@ test("图书控制先扫描全部框架再只控制选中的框架", () => {
   assert.match(client, /runAt: "document_start"/);
   assert.match(client, /world: "MAIN"/);
   assert.match(client, /matchOriginAsFallback: true/);
-  assert.match(client, /\*:\/\/\*\.chaoxing\.com\/\*/);
-  assert.match(client, /\*:\/\/\*\.sslibrary\.com\/\*/);
+  assert.match(client, /function isRelevantNavigationUrl\(value\)/);
+  assert.match(client, /if \(isRelevantNavigationUrl\(frame && frame\.url\)\) addUrl/);
+  assert.doesNotMatch(client, /Math\.max\(0, rect\.width\) \* Math\.max\(0, rect\.height\) >= 12000/);
   assert.match(popup, /sendBookTargetCommand\("DETECT"/);
   assert.match(popup, /sendBookTargetCommand\("PREV"/);
   assert.match(popup, /sendBookTargetCommand\("NEXT"/);
   assert.match(html, /id="bookDetectBtn">检测图书</);
-  assert.match(html, /MAIN 主环境原生强控/);
-  assert.match(html, /只控制已检测到的阅读器，不会点击课程的下一节/);
+  assert.match(html, /适用于普通网页图书阅读器/);
+  assert.match(html, /适用于普通网页中的图片序列/);
+  assert.doesNotMatch(html.match(/id="bookPageView"[\s\S]*?id="bookChaoxingView"/)[0], /学习通章节|旧版学习通图书|JPath 图片控制器/);
   assert.match(schema, /"DETECT", "NEXT", "PREV"/);
   assert.match(schema, /\["book", "image", "chaoxing"\]/);
   assert.match(html, /data-book-view="book">&#22270;&#20070;&#33258;&#21160;&#32763;&#38405;/);
@@ -627,4 +644,66 @@ test("图书检测消息允许绑定当前学习通标签页和网站权限", ()
     url: "chrome-extension://extension-id/popup/index.html"
   });
   assert.equal(tooFastRegularBookResult.ok, false);
+});
+
+test("Developer SDK 图书控制绑定授权标签页并隔离不同脚本的自动翻阅任务", () => {
+  const background = read("background/service-worker.js");
+  const sdkService = read("background/sdk-service.js");
+  const sessionController = read("popup/sdk-session-controller.js");
+
+  assert.match(background, /controlBook:\s*controlSdkBook/);
+  assert.match(background, /capability === "book\.read" \|\| capability === "book\.control"/);
+  assert.match(sessionController, /capability === "book\.read" \|\| capability === "book\.control"/);
+  assert.match(sdkService, /originPattern:\s*String\(context\.originPattern \|\| ""\)/);
+  assert.match(sdkService, /controlBook\(session,\s*request,\s*complete\)/);
+  assert.match(background, /function readSdkBookStatus\(tabId,\s*mode,\s*callback\)/);
+  assert.match(background, /Number\(bookState\.tabId\) === targetTabId && bookState\.mode === selectedMode/);
+  assert.match(background, /function sdkBookTaskMatches\(session,\s*mode\)[\s\S]*?bookState\.ownerType === "sdk"[\s\S]*?bookState\.ownerScriptId === String\(session && session\.scriptId/);
+  assert.match(background, /bookState\.ownerSessionId === String\(session && session\.ownerSessionId/);
+  assert.match(background, /function clearBookRunningState\(\)[\s\S]*?bookState\.ownerSessionId = ""/);
+  assert.match(background, /function captureBookTaskIdentity\(\)[\s\S]*?ownerSessionId:\s*bookState\.ownerSessionId/);
+  assert.match(background, /function sameBookTask\(identity\)[\s\S]*?bookState\.ownerSessionId === identity\.ownerSessionId/);
+  assert.match(background, /function validateSdkBookRuntimeSession\(session,\s*capability,\s*callback\)[\s\S]*?active\.ownerSessionId === session\.ownerSessionId[\s\S]*?permissionService\.validateRuntimeToken/);
+  assert.match(background, /sdkOwnerSessionId:\s*String\(session\.ownerSessionId \|\| ""\)/);
+  assert.match(background, /function sdkBookOwnerMatches\(criteria,\s*ownerSessionId,\s*scriptId,\s*tabId\)[\s\S]*?if \(criteria\.ownerSessionId\) return String\(criteria\.ownerSessionId\) === String\(ownerSessionId \|\| ""\)/);
+  assert.match(background, /function releaseSdkBookResources\(criteria\)[\s\S]*?cancelSdkBookOwners\(criteria\)[\s\S]*?sdkBookOwnerMatches\([\s\S]*?bookState\.ownerSessionId[\s\S]*?bookState\.ownerScriptId[\s\S]*?bookState\.tabId/);
+  assert.match(background, /function registerSdkBookPendingOwner\(session\)[\s\S]*?pending\.count \+= 1[\s\S]*?count:\s*1/);
+  assert.doesNotMatch(background.match(/function registerSdkBookPendingOwner\(session\)[\s\S]*?function unregisterSdkBookPendingOwner/)[0], /delete sdkBookCancelledOwners/);
+  assert.match(background, /function cancelSdkBookOwners\(criteria\)[\s\S]*?sdkBookCancelledOwners\[ownerSessionId\] = true/);
+  assert.match(background, /var turnOwnerSessionId = registerSdkBookPendingOwner\(session\)[\s\S]*?runBookTurn\(command[\s\S]*?sdkBookCancelledOwners[\s\S]*?unregisterSdkBookPendingOwner\(turnOwnerSessionId\)/);
+  assert.match(background, /command === "STOP"[\s\S]*?cancelSdkBookOwners\(\{ ownerSessionId:[\s\S]*?clearSdkBookCancellations\(stopCancelledOwnerSessionIds\)/);
+  assert.doesNotMatch(background, /sdkBookIntervalFitsSession|SDK_BOOK_INTERVAL_EXCEEDS_SESSION/);
+  assert.match(background, /function sameBookTask\(identity\)[\s\S]*?sdkBookCancelledOwners\[identity\.ownerSessionId\]/);
+  assert.match(background, /typeof continueCheck === "function" && !continueCheck\(\)[\s\S]*?BOOK_TASK_CANCELLED[\s\S]*?callMainWorldBookCore/);
+  assert.match(background, /bookState\.ownerSessionId = bookState\.ownerType === "sdk" \? String\(d\.bookPanelState\.ownerSessionId \|\| ""\) : ""/);
+  assert.match(background, /var valid = active[\s\S]*?active\.persistent === true/);
+  assert.match(background, /var session = sessions\[token\][\s\S]*?session\.persistent === true/);
+  assert.match(background, /code:\s*sdkBookTaskMatches\(session,\s*selectedMode\) \? "BOOK_TASK_ALREADY_RUNNING" : "BOOK_TASK_CONFLICT"/);
+  assert.match(background, /code:\s*"BOOK_TASK_MODE_MISMATCH"/);
+  assert.match(background, /function enqueueSdkBookMutation\(task,\s*callback\)/);
+  assert.match(background, /function releaseSdkBookResources\(criteria\)/);
+  assert.match(background, /function sdkContextChanged\(error\)[\s\S]*?code:\s*"SDK_CONTEXT_CHANGED"/);
+  assert.match(background, /function validateSdkBoundPage\(target,\s*boundContext,\s*callback\)[\s\S]*?chrome\.tabs\.get\(tabId[\s\S]*?actualOrigin !== expectedOrigin \|\| actualPattern !== expectedPattern[\s\S]*?sdkContextChanged/);
+  assert.match(background, /function bindSdkBookTarget\(target,\s*boundContext,\s*callback\)[\s\S]*?chrome\.webNavigation\.getAllFrames\(\{ tabId: tabId \}[\s\S]*?documentIds:\s*documentIds/);
+  assert.match(background, /if \(!chrome\.webNavigation \|\| typeof chrome\.webNavigation\.getAllFrames !== "function"\)[\s\S]*?Browser document binding is unavailable/);
+  assert.match(background, /function callMainWorldBookCore\(target,\s*command,\s*callback,\s*boundContext\)[\s\S]*?validateSdkBoundPage\(target,\s*boundContext/);
+  assert.match(background, /function injectMainWorldBookCore\(target,\s*callback,\s*boundContext\)[\s\S]*?validateSdkBoundPage\(target,\s*boundContext/);
+  const callMainWorldBookCoreBlock = background.slice(
+    background.indexOf("function callMainWorldBookCore"),
+    background.indexOf("function releaseSdkTabSessions")
+  );
+  const injectMainWorldBookCoreBlock = background.slice(
+    background.indexOf("function injectMainWorldBookCore"),
+    background.indexOf("function runBookTurn")
+  );
+  assert.equal((callMainWorldBookCoreBlock.match(/bindSdkBookTarget\(target,\s*boundContext/g) || []).length, 1);
+  assert.equal((callMainWorldBookCoreBlock.match(/validateSdkBoundPage\(target,\s*boundContext/g) || []).length, 2);
+  assert.equal((injectMainWorldBookCoreBlock.match(/bindSdkBookTarget\(target,\s*boundContext/g) || []).length, 1);
+  assert.equal((injectMainWorldBookCoreBlock.match(/validateSdkBoundPage\(target,\s*boundContext/g) || []).length, 2);
+  assert.match(background, /function readSdkBookStatusBound\(tabId,\s*mode,\s*boundContext,\s*callback\)[\s\S]*?runBookTurn\("DETECT"[\s\S]*?boundContext\)/);
+  assert.match(background, /runBookTurn\(command,\s*tabId,\s*originPattern,\s*selectedMode[\s\S]*?boundContext\)/);
+  assert.match(background, /sdkOwnerOrigin:\s*String\(session\.origin \|\| ""\)/);
+  assert.match(background, /bookState\.ownerOrigin = bookState\.ownerType === "sdk" \? String\(req\.sdkOwnerOrigin \|\| ""\) : ""/);
+  assert.match(background, /runBookTurn\("NEXT",\s*bookState\.tabId,\s*bookState\.originPattern,\s*bookState\.mode[\s\S]*?activeSdkBookBoundContext\(\)/);
+  assert.doesNotMatch(background, /ownerExpiresAt|sdkOwnerExpiresAt|BOOK_SDK_EXPIRY_ALARM|SDK_TOKEN_EXPIRED/);
 });

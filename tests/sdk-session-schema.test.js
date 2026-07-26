@@ -46,18 +46,35 @@ test("SDK 会话创建消息要求受信弹窗、能力确认和安全脚本标�
     confirmed: true
   };
   assert.equal(schema.parse(envelope("prepareSdkSession", payload), sender).ok, true);
+  assert.equal(schema.parse(envelope("prepareSdkSession", { ...payload, bookMode: "book" }), sender).ok, false);
   assert.equal(schema.parse(envelope("prepareSdkSession", { ...payload, confirmed: false }), sender).ok, false);
   assert.equal(schema.parse(envelope("prepareSdkSession", { ...payload, scriptId: "__proto__" }), sender).ok, false);
   assert.equal(schema.parse(envelope("prepareSdkSession", payload), { id: "extension-id", url: "chrome-extension://extension-id/other.html" }).ok, false);
+
+  const bookPayload = {
+    ...payload,
+    code: "// ==UserScript==\n// @wsb-capability book.control\n// ==/UserScript==",
+    capabilities: ["book.control"],
+    bookMode: "image"
+  };
+  assert.equal(schema.parse(envelope("prepareSdkSession", bookPayload), sender).ok, true);
+  const { bookMode: omittedBookMode, ...bookPayloadWithoutMode } = bookPayload;
+  assert.equal(omittedBookMode, "image");
+  assert.equal(schema.parse(envelope("prepareSdkSession", bookPayloadWithoutMode), sender).ok, false);
+  assert.equal(schema.parse(envelope("prepareSdkSession", { ...bookPayload, bookMode: "other" }), sender).ok, false);
 });
 
 test("SDK 上下文预备消息只接受已登记能力", () => {
   const schema = loadSchema();
   assert.equal(schema.parse(envelope("prepareSdkContext", { capabilities: ["video.read"] }), sender).ok, true);
-  assert.equal(schema.parse(envelope("prepareSdkContext", { capabilities: ["book.read"] }), sender).ok, true);
-  const allCapabilities = ["video.read", "video.control", "ocr.read", "qa.read", "ai.read", "ai.request", "page.read", "book.read", "storage"];
-  assert.equal(schema.parse(envelope("prepareSdkContext", { capabilities: allCapabilities }), sender).ok, true);
-  assert.equal(schema.parse(envelope("prepareSdkContext", { capabilities: allCapabilities.concat("book.read") }), sender).ok, false);
+  assert.equal(schema.parse(envelope("prepareSdkContext", { capabilities: ["video.read"], bookMode: "book" }), sender).ok, false);
+  assert.equal(schema.parse(envelope("prepareSdkContext", { capabilities: ["book.read"], bookMode: "book" }), sender).ok, true);
+  assert.equal(schema.parse(envelope("prepareSdkContext", { capabilities: ["book.control"], bookMode: "image" }), sender).ok, true);
+  assert.equal(schema.parse(envelope("prepareSdkContext", { capabilities: ["book.read"] }), sender).ok, false);
+  assert.equal(schema.parse(envelope("prepareSdkContext", { capabilities: ["book.control"], bookMode: "other" }), sender).ok, false);
+  const allCapabilities = ["video.read", "video.control", "ocr.read", "qa.read", "ai.read", "ai.request", "page.read", "book.read", "book.control", "storage"];
+  assert.equal(schema.parse(envelope("prepareSdkContext", { capabilities: allCapabilities, bookMode: "chaoxing" }), sender).ok, true);
+  assert.equal(schema.parse(envelope("prepareSdkContext", { capabilities: allCapabilities.concat("book.read"), bookMode: "chaoxing" }), sender).ok, false);
   assert.equal(schema.parse(envelope("prepareSdkContext", { capabilities: ["internal.service"] }), sender).ok, false);
   assert.equal(schema.parse(envelope("prepareSdkContext", { capabilities: [] }), sender).ok, false);
 });

@@ -3,8 +3,6 @@
 
   var GRANTS_KEY = "sdkPermissionGrants";
   var TOKENS_KEY = "sdkRuntimeTokens";
-  var DEFAULT_TOKEN_TTL_MS = 5 * 60 * 1000;
-  var MAX_TOKEN_TTL_MS = 10 * 60 * 1000;
   var MAX_CODE_LENGTH = 200000;
   var contracts = global.WinSpeedBallSdkContracts;
   var storage = global.WinSpeedBallStorageService;
@@ -337,7 +335,7 @@
     if (!validScriptId(scriptId)) return Promise.resolve(failure("SDK_SCRIPT_ID_INVALID", "The SDK script identifier is invalid."));
     return enqueueTokenMutation(function () {
       return readTokenStore().then(function (tokens) {
-        var changed = purgeExpiredTokens(tokens, Date.now());
+        var changed = purgeUnsupportedTokenRecords(tokens);
         var revoked = 0;
         Object.keys(tokens).forEach(function (token) {
           if (isObject(tokens[token]) && tokens[token].scriptId === scriptId) {
@@ -454,11 +452,11 @@
     });
   }
 
-  function purgeExpiredTokens(tokens, now) {
+  function purgeUnsupportedTokenRecords(tokens) {
     var removed = 0;
     Object.keys(tokens).forEach(function (token) {
       var record = tokens[token];
-      if (!isObject(record) || !Number.isFinite(record.expiresAt) || record.expiresAt <= now) {
+      if (!isObject(record) || record.persistent !== true) {
         delete tokens[token];
         removed += 1;
       }
@@ -479,16 +477,12 @@
     return token;
   }
 
-  function createRuntimeToken(input, ttlMs) {
-    var lifetime = ttlMs == null ? DEFAULT_TOKEN_TTL_MS : Number(ttlMs);
-    if (!Number.isInteger(lifetime) || lifetime < 1 || lifetime > MAX_TOKEN_TTL_MS) {
-      return Promise.resolve(failure("SDK_TOKEN_TTL_INVALID", "The runtime token lifetime is invalid."));
-    }
+  function createRuntimeToken(input) {
     return check(input).then(function (permission) {
       if (!permission.ok || permission.allowed !== true) return permission;
       return enqueueTokenMutation(function () {
         return readTokenStore().then(function (tokens) {
-          purgeExpiredTokens(tokens, Date.now());
+          purgeUnsupportedTokenRecords(tokens);
           var token;
           try { token = randomToken(tokens); }
           catch (error) { return error && error.ok === false ? error : failure("SDK_TOKEN_CREATE_FAILED", error && error.message || String(error)); }
@@ -502,7 +496,7 @@
             sdkVersion: grantRecord.sdkVersion,
             fingerprint: grantRecord.fingerprint,
             issuedAt: issuedAt,
-            expiresAt: issuedAt + lifetime
+            persistent: true
           };
           return writeTokenStore(tokens).then(function () {
             return success({
@@ -510,7 +504,7 @@
               scriptId: grantRecord.scriptId,
               grantFingerprint: grantRecord.fingerprint,
               issuedAt: issuedAt,
-              expiresAt: issuedAt + lifetime
+              persistent: true
             });
           });
         });
@@ -578,8 +572,8 @@
   }
 
   function normalizeStoredToken(record) {
-    if (!isObject(record) || !validCodeHash(record.fingerprint) || !Number.isFinite(record.issuedAt) || !Number.isFinite(record.expiresAt) ||
-        record.issuedAt < 0 || record.expiresAt <= record.issuedAt || record.expiresAt - record.issuedAt > MAX_TOKEN_TTL_MS) {
+    if (!isObject(record) || record.persistent !== true || !validCodeHash(record.fingerprint) ||
+        !Number.isFinite(record.issuedAt) || record.issuedAt < 0) {
       return failure("SDK_TOKEN_INVALID", "The stored runtime token is invalid.", { valid: false });
     }
     var normalized = normalizeBinding(record);
@@ -593,7 +587,7 @@
         sdkVersion: normalized.binding.sdkVersion,
         fingerprint: record.fingerprint,
         issuedAt: record.issuedAt,
-        expiresAt: record.expiresAt
+        persistent: true
       }
     });
   }
@@ -610,7 +604,7 @@
     return enqueueTokenMutation(function () {
       return readTokenStore().then(function (tokens) {
         var rawRecord = tokens[token];
-        var changed = purgeExpiredTokens(tokens, Date.now());
+        var changed = purgeUnsupportedTokenRecords(tokens);
         if (!rawRecord) {
           return persistTokenCleanup(tokens, changed, failure("SDK_TOKEN_INVALID", "The runtime token is invalid or was revoked.", { valid: false }));
         }
@@ -623,9 +617,6 @@
           return persistTokenCleanup(tokens, changed, normalized);
         }
         var record = normalized.record;
-        if (record.expiresAt <= Date.now()) {
-          return persistTokenCleanup(tokens, changed, failure("SDK_TOKEN_EXPIRED", "The runtime token has expired.", { valid: false }));
-        }
         return fingerprintBinding(record).then(function (calculatedFingerprint) {
           if (!constantTimeEqual(calculatedFingerprint, record.fingerprint)) {
             if (Object.prototype.hasOwnProperty.call(tokens, token)) {
@@ -658,7 +649,7 @@
               scriptId: record.scriptId,
               capability: contextResult.capability,
               grantFingerprint: record.fingerprint,
-              expiresAt: record.expiresAt
+              persistent: true
             }));
           });
           });
@@ -673,7 +664,7 @@
     if (!validRuntimeTokenId(token)) return Promise.resolve(success({ revoked: false }));
     return enqueueTokenMutation(function () {
       return readTokenStore().then(function (tokens) {
-        var changed = purgeExpiredTokens(tokens, Date.now());
+        var changed = purgeUnsupportedTokenRecords(tokens);
         var revoked = Object.prototype.hasOwnProperty.call(tokens, token);
         if (revoked) {
           delete tokens[token];
@@ -689,8 +680,6 @@
   global.WinSpeedBallPermissionService = Object.freeze({
     GRANTS_KEY: GRANTS_KEY,
     TOKENS_KEY: TOKENS_KEY,
-    DEFAULT_TOKEN_TTL_MS: DEFAULT_TOKEN_TTL_MS,
-    MAX_TOKEN_TTL_MS: MAX_TOKEN_TTL_MS,
     hashCode: hashCode,
     createGrantFingerprint: createGrantFingerprint,
     grant: grant,

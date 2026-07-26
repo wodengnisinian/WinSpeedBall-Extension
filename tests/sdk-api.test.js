@@ -10,13 +10,14 @@ const sdkFiles = [
   "page-api.js", "book-api.js", "event-api.js", "storage-api.js", "runtime.js"
 ];
 
-function buildRuntime() {
+function buildRuntime(options = {}) {
   const calls = [];
   const subscriptions = [];
   const context = { self: {}, Object, Array, String, Number, JSON, Promise, TypeError };
   vm.createContext(context);
   for (const file of sdkFiles) vm.runInContext(fs.readFileSync(path.join(root, "sdk", file), "utf8"), context);
   const runtime = context.self.WinSpeedBallSdkRuntime.create({
+    bookMode: options.bookMode,
     invoke(method, args) {
       calls.push({ method, args });
       return { method, args };
@@ -51,6 +52,9 @@ test("Video API 使用精简名称并转换为稳定协议方法", async () => {
   await fixture.runtime.video.mute();
   await fixture.runtime.video.play();
   await fixture.runtime.video.pause();
+  await fixture.runtime.video.auto();
+  await fixture.runtime.video.lock(false);
+  await fixture.runtime.video.reset();
   assert.deepEqual(JSON.parse(JSON.stringify(fixture.calls)), [
     { method: "video.getAll", args: [] },
     { method: "video.current", args: [] },
@@ -59,7 +63,10 @@ test("Video API 使用精简名称并转换为稳定协议方法", async () => {
     { method: "video.setVolume", args: [0.5] },
     { method: "video.mute", args: [true] },
     { method: "video.play", args: [] },
-    { method: "video.pause", args: [] }
+    { method: "video.pause", args: [] },
+    { method: "video.setAutoplay", args: [true] },
+    { method: "video.setRateLock", args: [false] },
+    { method: "video.reset", args: [] }
   ]);
 });
 
@@ -69,7 +76,56 @@ test("旧版长方法名继续映射到同一实现", () => {
   assert.equal(runtime.video.getStatus, runtime.video.status);
   assert.equal(runtime.video.setRate, runtime.video.rate);
   assert.equal(runtime.video.setVolume, runtime.video.volume);
+  assert.equal(runtime.video.autoplay, runtime.video.auto);
+  assert.equal(runtime.video.setAutoplay, runtime.video.auto);
+  assert.equal(runtime.video.rateLock, runtime.video.lock);
+  assert.equal(runtime.video.setRateLock, runtime.video.lock);
   assert.equal(runtime.book.getStatus, runtime.book.status);
+  assert.equal(runtime.book.turnPrev, runtime.book.prev);
+  assert.equal(runtime.book.turnNext, runtime.book.next);
+  assert.equal(runtime.book.startAuto, runtime.book.start);
+  assert.equal(runtime.book.stopAuto, runtime.book.stop);
+  assert.equal(runtime.book.setInterval, runtime.book.interval);
+});
+
+test("Book API 提供状态、翻页和自动翻阅短接口并补齐安全默认参数", async () => {
+  const fixture = buildRuntime();
+  await fixture.runtime.book.status();
+  await fixture.runtime.book.status("image");
+  await fixture.runtime.book.prev();
+  await fixture.runtime.book.next("chaoxing");
+  await fixture.runtime.book.start();
+  await fixture.runtime.book.start({ mode: "chaoxing" });
+  await fixture.runtime.book.stop();
+  await fixture.runtime.book.interval(45);
+  await fixture.runtime.book.interval(2, "chaoxing");
+  assert.deepEqual(JSON.parse(JSON.stringify(fixture.calls)), [
+    { method: "book.getStatus", args: [] },
+    { method: "book.getStatus", args: ["image"] },
+    { method: "book.turnPrev", args: ["book"] },
+    { method: "book.turnNext", args: ["chaoxing"] },
+    { method: "book.startAuto", args: [{ mode: "book", intervalSeconds: 30 }] },
+    { method: "book.startAuto", args: [{ mode: "chaoxing", intervalSeconds: 2 }] },
+    { method: "book.stopAuto", args: [] },
+    { method: "book.setInterval", args: [45, "book"] },
+    { method: "book.setInterval", args: [2, "chaoxing"] }
+  ]);
+});
+
+test("Book API 无参控制方法使用本次会话授权模式", async () => {
+  const fixture = buildRuntime({ bookMode: "chaoxing" });
+  await fixture.runtime.book.status();
+  await fixture.runtime.book.prev();
+  await fixture.runtime.book.next();
+  await fixture.runtime.book.start();
+  await fixture.runtime.book.interval(2);
+  assert.deepEqual(JSON.parse(JSON.stringify(fixture.calls)), [
+    { method: "book.getStatus", args: [] },
+    { method: "book.turnPrev", args: ["chaoxing"] },
+    { method: "book.turnNext", args: ["chaoxing"] },
+    { method: "book.startAuto", args: [{ mode: "chaoxing", intervalSeconds: 2 }] },
+    { method: "book.setInterval", args: [2, "chaoxing"] }
+  ]);
 });
 
 test("OCR、问题、AI 和 Page API 使用统一异步调用", async () => {
@@ -112,16 +168,25 @@ test("Storage API 校验键、序列化和单值大小", async () => {
     { method: "storage.set", args: ["learning.progress", { value: 50 }] },
     { method: "storage.get", args: ["learning.progress"] }
   ]);
-  assert.throws(() => fixture.runtime.storage.get("__proto__"), (error) => error.code === "SDK_INVALID_ARGUMENT");
-  assert.throws(() => fixture.runtime.storage.set("large", "x".repeat(65537)), (error) => error.code === "SDK_INVALID_ARGUMENT");
+  await assert.rejects(fixture.runtime.storage.get("__proto__"), (error) => error.code === "SDK_INVALID_ARGUMENT");
+  await assert.rejects(fixture.runtime.storage.set("large", "x".repeat(65537)), (error) => error.code === "SDK_INVALID_ARGUMENT");
 });
 
-test("SDK API 在发送前拒绝明显错误参数", () => {
+test("SDK API 在发送前通过 Promise 拒绝明显错误参数", async () => {
   const fixture = buildRuntime();
-  assert.throws(() => fixture.runtime.video.setRate(0), (error) => error.code === "SDK_INVALID_ARGUMENT");
-  assert.throws(() => fixture.runtime.video.setVolume(2), (error) => error.code === "SDK_INVALID_ARGUMENT");
-  assert.throws(() => fixture.runtime.ai.ask(""), (error) => error.code === "SDK_INVALID_ARGUMENT");
-  assert.throws(() => fixture.runtime.ai.history(21), (error) => error.code === "SDK_INVALID_ARGUMENT");
+  const invalidRate = fixture.runtime.video.setRate(0);
+  assert.equal(invalidRate instanceof Promise, true);
+  await assert.rejects(invalidRate, (error) => error.code === "SDK_INVALID_ARGUMENT");
+  await assert.rejects(fixture.runtime.video.setVolume(2), (error) => error.code === "SDK_INVALID_ARGUMENT");
+  await assert.rejects(fixture.runtime.video.auto("yes"), (error) => error.code === "SDK_INVALID_ARGUMENT");
+  await assert.rejects(fixture.runtime.video.lock(1), (error) => error.code === "SDK_INVALID_ARGUMENT");
+  await assert.rejects(fixture.runtime.book.prev("course"), (error) => error.code === "SDK_INVALID_ARGUMENT");
+  await assert.rejects(fixture.runtime.book.start({ mode: "book", intervalSeconds: 29 }), (error) => error.code === "SDK_INVALID_ARGUMENT");
+  await assert.rejects(fixture.runtime.book.start({ mode: "image", intervalSeconds: 241 }), (error) => error.code === "SDK_INVALID_ARGUMENT");
+  await assert.rejects(fixture.runtime.book.start({ mode: "book", intervalSeconds: 30, extra: true }), (error) => error.code === "SDK_INVALID_ARGUMENT");
+  await assert.rejects(fixture.runtime.book.interval(1, "chaoxing"), (error) => error.code === "SDK_INVALID_ARGUMENT");
+  await assert.rejects(fixture.runtime.ai.ask(""), (error) => error.code === "SDK_INVALID_ARGUMENT");
+  await assert.rejects(fixture.runtime.ai.history(21), (error) => error.code === "SDK_INVALID_ARGUMENT");
   assert.throws(() => fixture.runtime.event.on("video.finish", null), (error) => error.code === "SDK_INVALID_ARGUMENT");
   assert.throws(() => fixture.runtime.event.on("internal.event", () => {}), (error) => error.code === "SDK_INVALID_ARGUMENT");
   assert.equal(fixture.calls.length, 0);

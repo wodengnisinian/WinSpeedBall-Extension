@@ -41,10 +41,12 @@ test("浏览器弹窗和独立窗口隔离工作区状态但共享最后功能�
   assert.equal(browser.stateKey, "popupStateBrowser");
   assert.equal(browser.panelKey, "popupLastPanelBrowser");
   assert.equal(browser.sharedPanelKey, "popupLastPanel");
+  assert.equal(browser.sharedViewKey, "popupLastView");
   assert.equal(pinned.mode, "pinned");
   assert.equal(pinned.stateKey, "popupStatePinned");
   assert.equal(pinned.panelKey, "popupLastPanelPinned");
   assert.equal(pinned.sharedPanelKey, "popupLastPanel");
+  assert.equal(pinned.sharedViewKey, "popupLastView");
 });
 
 test("浏览器弹窗不会恢复独立窗口的脚本工作区", async () => {
@@ -83,11 +85,24 @@ test("保存状态时同步共享功能页，独立窗口兼容旧状态键", as
   };
   const browser = api.create({ search: "", document: createDocument(), storage });
   const pinned = api.create({ search: "?pinned=1", document: createDocument(), storage });
-  browser.saveState({ lastPanelId: "aiPanel" });
+  browser.saveState({
+    lastPanelId: "aiPanel",
+    viewMode: "aiTeaching",
+    questionView: "voice",
+    bookView: "chaoxing",
+    logView: "updates",
+    scrollPositions: { aiPanel: 218.7, aiTeachingPage: 96 }
+  });
   pinned.saveState({ lastPanelId: "videoPanel", scriptWorkspaceActive: true });
   assert.equal(writes[0].popupStateBrowser.lastPanelId, "aiPanel");
   assert.equal(writes[0].popupLastPanelBrowser, "aiPanel");
   assert.equal(writes[0].popupLastPanel, "aiPanel");
+  assert.equal(writes[0].popupLastView.viewMode, "aiTeaching");
+  assert.equal(writes[0].popupLastView.questionView, "voice");
+  assert.equal(writes[0].popupLastView.bookView, "chaoxing");
+  assert.equal(writes[0].popupLastView.logView, "updates");
+  assert.equal(writes[0].popupLastView.scrollPositions.aiPanel, 219);
+  assert.equal(writes[0].popupLastView.scrollPositions.aiTeachingPage, 96);
   assert.equal(writes[0].popupState, undefined);
   assert.equal(writes[1].popupStatePinned.scriptWorkspaceActive, true);
   assert.equal(writes[1].popupLastPanelPinned, "videoPanel");
@@ -95,21 +110,35 @@ test("保存状态时同步共享功能页，独立窗口兼容旧状态键", as
   assert.equal(writes[1].popupState.scriptWorkspaceActive, true);
 });
 
-test("共享功能页优先于窗口旧状态", async () => {
+test("共享完整界面状态优先于窗口旧状态", async () => {
   const api = loadApi();
   const storage = {
     get(keys, callback) {
       callback({
         popupStateBrowser: { lastPanelId: "logPanel" },
         popupLastPanelBrowser: "videoPanel",
-        popupLastPanel: "assistantPanel"
+        popupLastPanel: "assistantPanel",
+        popupLastView: {
+          lastPanelId: "bookPanel",
+          viewMode: "aiTeaching",
+          questionView: "voice",
+          bookView: "image",
+          logView: "updates",
+          scrollPositions: { bookPanel: 164, logUpdates: 390 }
+        }
       });
     },
     set() {}
   };
   const controller = api.create({ search: "", document: createDocument(), storage });
   const state = await new Promise((resolve) => controller.loadState(resolve));
-  assert.equal(state.lastPanelId, "ocrPanel");
+  assert.equal(state.lastPanelId, "bookPanel");
+  assert.equal(state.viewMode, "aiTeaching");
+  assert.equal(state.questionView, "voice");
+  assert.equal(state.bookView, "image");
+  assert.equal(state.logView, "updates");
+  assert.equal(state.scrollPositions.bookPanel, 164);
+  assert.equal(state.scrollPositions.logUpdates, 390);
 });
 
 test("临时合并页面状态迁移回 OCR，独立 OCR 和 AI 状态保持不变", () => {
@@ -117,8 +146,34 @@ test("临时合并页面状态迁移回 OCR，独立 OCR 和 AI 状态保持不�
   assert.equal(api.normalizePanelId("assistantPanel"), "ocrPanel");
   assert.equal(api.normalizePanelId("ocrPanel"), "ocrPanel");
   assert.equal(api.normalizePanelId("aiPanel"), "aiPanel");
+  assert.equal(api.normalizePanelId("aiTeachingPanel"), "aiPanel");
   assert.equal(api.normalizePanelId("videoPanel"), "videoPanel");
   assert.equal(api.normalizeState({ lastPanelId: "assistantPanel" }, "browser").lastPanelId, "ocrPanel");
+  assert.equal(api.normalizeState({ lastPanelId: "aiTeachingPanel" }, "browser").viewMode, "aiTeaching");
+  assert.equal(api.normalizeState({ questionView: "voice", bookView: "chaoxing", logView: "updates" }, "browser").questionView, "voice");
+  assert.equal(api.normalizeState({ questionView: "voice", bookView: "chaoxing", logView: "updates" }, "browser").bookView, "chaoxing");
+  assert.equal(api.normalizeState({ questionView: "voice", bookView: "chaoxing", logView: "updates" }, "browser").logView, "updates");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(api.normalizeScrollPositions({ aiPanel: 12.7, invalid: -4, "bad-key": 8, huge: 2000000 }))),
+    { aiPanel: 13, invalid: 0, huge: 1000000 }
+  );
+});
+
+test("旧问题标签记忆会迁移到统一界面状态", async () => {
+  const api = loadApi();
+  const storage = {
+    get(keys, callback) {
+      callback({
+        popupStateBrowser: { lastPanelId: "ocrPanel" },
+        popupLastQuestionView: "voice"
+      });
+    },
+    set() {}
+  };
+  const controller = api.create({ search: "", document: createDocument(), storage });
+  const state = await new Promise((resolve) => controller.loadState(resolve));
+  assert.equal(state.lastPanelId, "ocrPanel");
+  assert.equal(state.questionView, "voice");
 });
 
 test("主页面只通过后台窗口服务打开独立窗口并分别记忆面板滚动位置", () => {
@@ -129,16 +184,30 @@ test("主页面只通过后台窗口服务打开独立窗口并分别记忆面�
   assert.match(popup, /windowModeController\.bindPinButton/);
   assert.match(popup, /panelScrollPositions\[activePanel\.id\] = content\.scrollTop/);
   assert.match(popup, /content\.scrollTop = Number\(panelScrollPositions\[panelId\] \|\| 0\)/);
+  assert.match(popup, /scrollPositions: captureScrollPositions\(\)/);
+  assert.match(popup, /panelScrollPositions = Object\.assign\(Object\.create\(null\), state\.scrollPositions \|\| \{\}\)/);
+  assert.match(popup, /schedulePopupScrollSave/);
   assert.match(popup, /panelSelectedThisOpen = true/);
   assert.match(popup, /if \(!panelSelectedThisOpen && state\.lastPanelId\)/);
+  assert.match(popup, /document\.documentElement\.dataset\.uiRestored = "true"/);
+  assert.match(popup, /viewMode: document\.body\.classList\.contains\("ai-teaching-mode"\) \? "aiTeaching" : "main"/);
+  assert.match(popup, /if \(!bookViewSelectedThisOpen\) selectBookView\(state\.bookView, false\)/);
+  assert.match(popup, /if \(!logViewSelectedThisOpen\) selectLogView\(state\.logView, false\)/);
+  assert.match(popup, /setAiTeachingMode\(state\.viewMode === "aiTeaching", false\)/);
+  assert.match(popup, /action: "setPinnedWindowTeachingMode",\s*payload: \{ enabled: enabled \}/);
+  assert.match(popup, /window\.addEventListener\("pagehide", function \(\) \{ savePopupState\(\); \}\)/);
 });
 
 test("OCR 与 AI 使用独立功能页，发送 OCR 时才进入 AI 页面", () => {
   const popup = fs.readFileSync(path.join(root, "popup/index.js"), "utf8");
   const html = fs.readFileSync(path.join(root, "popup/index.html"), "utf8");
-  assert.match(html, /data-panel="ocrPanel">问题获取<\/button>\s*<button class="side-btn" data-panel="aiPanel">AI<\/button>/);
+  assert.match(html, /data-panel="ocrPanel">问题获取<\/button>\s*<button class="side-btn" data-panel="aiPanel">AI答题<\/button>\s*<button class="side-btn" data-panel="bookPanel">/);
   assert.match(html, /<section class="panel" id="ocrPanel" aria-label="问题获取">/);
-  assert.match(html, /<section class="panel" id="aiPanel" aria-label="AI">/);
+  assert.match(html, /<section class="panel" id="aiPanel" aria-label="AI答题">/);
+  assert.match(html, /id="openAiTeachingBtn"[^>]*>AI教学<\/button>/);
+  assert.match(html, /id="closeAiTeachingBtn"[^>]*>返回正常界面<\/button>/);
+  assert.match(html, /<section class="ai-teaching-page" id="aiTeachingPanel" aria-label="AI教学">/);
+  assert.doesNotMatch(html, /data-panel="aiTeachingPanel"/);
   assert.doesNotMatch(html, /id="assistantPanel"/);
   assert.match(popup, /showPanel\("aiPanel", true\);\s*askAi\(\$\("ocrText"\)\.value\)/);
 });

@@ -91,7 +91,8 @@ test("FeatureGate 在订阅检查异常时默认拒绝且不泄漏异常", async
 function loadBackgroundGateAction(check) {
   const source = fs.readFileSync(path.join(root, "background/service-worker.js"), "utf8");
   const start = source.indexOf("  function gateAction(");
-  const end = source.indexOf("\n\n  function controlActiveTab", start);
+  const endMatch = /\r?\n\r?\n  function controlActiveTab/.exec(source.slice(start));
+  const end = endMatch ? start + endMatch.index : -1;
   assert.ok(start >= 0 && end > start, "background gateAction is missing");
   const context = { self: {}, featureGate: { check }, Promise, String };
   vm.createContext(context);
@@ -130,7 +131,7 @@ test("普通界面视频、OCR、AI 入口均使用对应 FeatureGate", () => {
   for (const action of ["captureVisiblePage", "startRegionCapture", "saveManualCapture", "getManualCapture"]) {
     assert.match(source, new RegExp(action + ":\\s*function\\s*\\([^)]*\\)\\s*\\{\\s*return gateAction\\(\"ocr\\.basic\""));
   }
-  for (const action of ["testAI", "askAI", "testDeepSeek", "askDeepSeek"]) {
+  for (const action of ["testAI", "askAI", "askAiTeaching", "testDeepSeek", "askDeepSeek"]) {
     assert.match(source, new RegExp(action + ":\\s*function\\s*\\([^)]*\\)\\s*\\{\\s*return gateAction\\(\"ai\\.basic\""));
   }
 });

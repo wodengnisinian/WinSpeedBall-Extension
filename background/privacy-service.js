@@ -7,7 +7,7 @@
     "manualCaptureDataUrl", "manualCaptureTime",
     "manualOcrText", "manualOcrSourceTime", "ocrJobSourceTime", "ocrJobStatus", "ocrJobProgress", "ocrJobStage", "ocrJobError", "ocrJobUpdatedAt",
     "voiceJobId", "voiceJobStatus", "voiceJobProgress", "voiceJobError", "voiceTranscript", "voiceStartedAt", "voiceJobUpdatedAt", "voiceTabId", "voiceDurationMs", "voiceNeedsToolbarPopup",
-    "aiQuestionHistory", "aiQuestionHistoryByProvider", "aiProviderWorkspaces", "aiSelectedProvider", "manualAiSourceTime", "manualAiPrompt", "manualAiResponse", "aiJobSourceTime", "aiJobStatus", "aiJobError", "aiJobUpdatedAt",
+    "aiQuestionHistory", "aiQuestionHistoryByProvider", "aiProviderWorkspaces", "aiSelectedProvider", "aiTeachingSession", "manualAiSourceTime", "manualAiPrompt", "manualAiResponse", "aiJobSourceTime", "aiJobStatus", "aiJobError", "aiJobUpdatedAt",
     "popupLogs", "userScripts", "developerSdkDraft", "developerSdkDrafts", "developerActiveDraftId", "sdkScriptStorage", "sdkPermissionGrants", "lastWorkspaceScript", "scriptWorkspaceActive", "popupState", "popupStateBrowser", "popupStatePinned",
     "localUserAccounts", "activeUserProviderId", "usageDeclarationAcceptance", "usageDeclarationHistory"
   ];
@@ -15,7 +15,7 @@
     "manualOcrText", "manualOcrSourceTime", "ocrJobSourceTime", "ocrJobStatus", "ocrJobProgress", "ocrJobStage", "ocrJobError", "ocrJobUpdatedAt",
     "voiceJobId", "voiceJobStatus", "voiceJobProgress", "voiceJobError", "voiceTranscript", "voiceStartedAt", "voiceJobUpdatedAt", "voiceTabId", "voiceDurationMs", "voiceNeedsToolbarPopup"
   ];
-  var AI_KEYS = ["aiQuestionHistory", "aiQuestionHistoryByProvider", "aiProviderWorkspaces", "aiSelectedProvider", "manualAiSourceTime", "manualAiPrompt", "manualAiResponse", "aiJobSourceTime", "aiJobStatus", "aiJobError", "aiJobUpdatedAt"];
+  var AI_KEYS = ["aiQuestionHistory", "aiQuestionHistoryByProvider", "aiProviderWorkspaces", "aiSelectedProvider", "aiTeachingSession", "manualAiSourceTime", "manualAiPrompt", "manualAiResponse", "aiJobSourceTime", "aiJobStatus", "aiJobError", "aiJobUpdatedAt"];
   var POPUP_STATE_KEYS = ["popupState", "popupStateBrowser", "popupStatePinned"];
 
   function getLocal() {
@@ -125,6 +125,7 @@
         }, 0)
         : (Array.isArray(data.aiQuestionHistory) ? data.aiQuestionHistory.length : 0);
       var latestAiCount = String(data.manualAiPrompt || "").trim() || String(data.manualAiResponse || "").trim() ? 1 : 0;
+      var teachingCount = data.aiTeachingSession && String(data.aiTeachingSession.problem || "").trim() ? 1 : 0;
       var scriptCount = Array.isArray(data.userScripts) ? data.userScripts.length : 0;
       var sdkDraftCount = Array.isArray(data.developerSdkDrafts) ? data.developerSdkDrafts.filter(function (draft) { return draft && String(draft.code || "").trim(); }).length : 0;
       if (!sdkDraftCount && data.developerSdkDraft && String(data.developerSdkDraft.code || "").trim()) sdkDraftCount = 1;
@@ -140,7 +141,7 @@
         categories: [
           { id: "screenshots", label: "Screenshots", count: values[1] },
           { id: "ocr", label: "Question capture records", count: ocrCount },
-          { id: "ai", label: "AI history", count: aiHistory + latestAiCount },
+          { id: "ai", label: "AI data", count: aiHistory + latestAiCount + teachingCount },
           { id: "logs", label: "Logs", count: Array.isArray(data.popupLogs) ? data.popupLogs.length : 0 },
           { id: "scripts", label: "User scripts", count: scriptCount },
           { id: "account", label: "Account data", count: Array.isArray(data.localUserAccounts) ? data.localUserAccounts.length : 0 }

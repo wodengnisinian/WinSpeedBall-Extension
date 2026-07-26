@@ -1,15 +1,16 @@
 (function (global) {
   "use strict";
 
-  var CORE_VERSION = "2026-07-17-main-book-core-v7";
+  var CORE_VERSION = "2026-07-17-main-book-core-v7.4";
   if (global.WinSpeedBallBookCoreV7 && global.WinSpeedBallBookCoreV7.version === CORE_VERSION) return;
   if (!global.document) return;
 
   var pristineRuntime = capturePristineRuntime();
   var nativeDefineProperty = pristineRuntime.defineProperty || Object.defineProperty;
   var nativeClick = pristineRuntime.click || (global.HTMLElement && global.HTMLElement.prototype.click);
-  var nativeDispatch = pristineRuntime.dispatchEvent || (global.EventTarget && global.EventTarget.prototype.dispatchEvent);
-  var NativeKeyboardEvent = pristineRuntime.KeyboardEvent || global.KeyboardEvent;
+  var nativeScrollIntoView = pristineRuntime.scrollIntoView || (global.Element && global.Element.prototype.scrollIntoView);
+  var nativeScrollTopGetter = pristineRuntime.scrollTopGetter;
+  var nativeScrollTopSetter = pristineRuntime.scrollTopSetter;
 
   function capturePristineRuntime() {
     var result = {};
@@ -20,11 +21,15 @@
       frame.style.cssText = "display:none!important;width:0!important;height:0!important;border:0!important";
       (global.document.documentElement || global.document.body).appendChild(frame);
       var cleanWindow = frame.contentWindow;
-      if (cleanWindow && cleanWindow.Object && cleanWindow.HTMLElement && cleanWindow.EventTarget) {
+      if (cleanWindow && cleanWindow.Object && cleanWindow.HTMLElement) {
         result.defineProperty = cleanWindow.Object.defineProperty;
         result.click = cleanWindow.HTMLElement.prototype.click;
-        result.dispatchEvent = cleanWindow.EventTarget.prototype.dispatchEvent;
-        result.KeyboardEvent = cleanWindow.KeyboardEvent;
+        if (cleanWindow.Element) {
+          result.scrollIntoView = cleanWindow.Element.prototype.scrollIntoView;
+          var scrollTopDescriptor = cleanWindow.Object.getOwnPropertyDescriptor(cleanWindow.Element.prototype, "scrollTop");
+          result.scrollTopGetter = scrollTopDescriptor && scrollTopDescriptor.get;
+          result.scrollTopSetter = scrollTopDescriptor && scrollTopDescriptor.set;
+        }
       }
     } catch (error) {
       result = {};
@@ -378,8 +383,8 @@
       if (pageInput) pageInput.value = String(targetCoordinate.page);
       if (typeInput) typeInput.value = String(targetCoordinate.type);
       if (readweb) readweb.scrollTop = 0;
-      result.method = result.mode === "chaoxing" ? "chaoxing-pdg-force" : "jpath-dom-force";
-      result.readerEngine = result.mode === "chaoxing" ? "chaoxing-pdg-jpath" : "jpath-readweb";
+      result.method = "chaoxing-pdg-force";
+      result.readerEngine = "chaoxing-pdg-jpath";
       result.page = String(targetCoordinate.page);
       result.pageType = String(targetCoordinate.type);
       result.pageTypeLabel = jpathPageTypeLabel(targetCoordinate.type);
@@ -395,16 +400,6 @@
   function imagePosition(candidates) {
     candidates = candidates || imageCandidates();
     if (!candidates.length) return { index: -1, total: 0, element: null };
-    var controller = getJpathController();
-    if (controller) {
-      try {
-        var current = typeof controller.currentJimg === "function" ? controller.currentJimg() : null;
-        var image = current && current.jimg ? (current.jimg[0] || current.jimg) : current;
-        var wrapper = image && image.closest ? image.closest(".duxiuimg") : image && image.parentElement;
-        var exactIndex = candidates.indexOf(wrapper || image);
-        if (exactIndex >= 0) return { index: exactIndex, total: candidates.length, element: candidates[exactIndex] };
-      } catch (error) {}
-    }
     var viewportCenter = Number(global.innerHeight || 0) / 2;
     var bestIndex = -1;
     var bestDistance = Infinity;
@@ -442,14 +437,6 @@
 
   function currentPage() {
     try {
-      if (global.cpageInfo && global.cpageInfo.cpage != null) return safeText(global.cpageInfo.cpage, 40);
-      if (global.readweb && typeof global.readweb.page === "function") return safeText(global.readweb.page(), 40);
-      if (global.readweb && typeof global.readweb.getPrarm === "function") {
-        var parameters = global.readweb.getPrarm();
-        if (parameters && parameters.page != null) return safeText(parameters.page, 40);
-      }
-    } catch (error) {}
-    try {
       if (global.myReader && global.myReader.config && global.myReader.config.cpage != null) {
         return safeText(global.myReader.config.cpage, 40);
       }
@@ -467,42 +454,6 @@
     var hasPageMethods = typeof controller.nextPage === "function" && typeof controller.prevPage === "function";
     var hasGoto = typeof controller.goto === "function" && (typeof controller.page === "function" || typeof controller.getPrarm === "function");
     return hasPageMethods || hasGoto ? controller : null;
-  }
-
-  function invokeJpathController(direction, result) {
-    var controller = getJpathController();
-    if (!controller) return false;
-    try {
-      var before = currentJpathState(controller);
-      var method = direction === "PREV" ? "prevPage" : "nextPage";
-      var parameters = typeof controller.getPrarm === "function" ? controller.getPrarm() : null;
-      var page = typeof controller.page === "function" ? Number(controller.page()) : Number(parameters && parameters.page);
-      if (typeof controller.goto === "function" && Number.isFinite(page)) {
-        global.isnext = direction !== "PREV";
-        controller.goto.call(controller, page + (direction === "PREV" ? -1 : 1), parameters && parameters.t);
-      } else if (typeof controller[method] === "function") {
-        controller[method].call(controller);
-      } else return false;
-      var after = currentJpathState(controller);
-      var changed = before.page !== after.page || before.type !== after.type || (!!before.image && before.image !== after.image);
-      if (!changed && typeof controller[method] === "function") {
-        controller[method].call(controller);
-        after = currentJpathState(controller);
-        changed = before.page !== after.page || before.type !== after.type || (!!before.image && before.image !== after.image);
-      }
-      if (!changed) {
-        result.jpathControllerError = "JPATH_PAGE_DID_NOT_CHANGE";
-        return false;
-      }
-      result.method = result.mode === "image" ? "jpath-image-controller" : "jpath-native-controller";
-      result.readerEngine = "jpath-readweb";
-      result.page = currentPage();
-      result.verified = true;
-      return true;
-    } catch (error) {
-      result.jpathControllerError = safeText(error && error.message || error, 160);
-      return false;
-    }
   }
 
   function invokeChaoxingPdgController(direction, result) {
@@ -540,6 +491,37 @@
     }
   }
 
+  function readNativeScrollTop(element) {
+    if (!element) return 0;
+    try {
+      if (typeof nativeScrollTopGetter === "function") return Number(nativeScrollTopGetter.call(element) || 0);
+    } catch (error) {}
+    return Number(element.scrollTop || 0);
+  }
+
+  function writeNativeScrollTop(element, value) {
+    if (!element) return false;
+    try {
+      if (typeof nativeScrollTopSetter === "function") nativeScrollTopSetter.call(element, value);
+      else element.scrollTop = value;
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function nativeScrollElementIntoView(element) {
+    if (!element) return false;
+    try {
+      if (typeof nativeScrollIntoView === "function") nativeScrollIntoView.call(element, { block: "start", inline: "nearest", behavior: "auto" });
+      else if (typeof element.scrollIntoView === "function") element.scrollIntoView({ block: "start", inline: "nearest", behavior: "auto" });
+      else return false;
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
   function findScrollableAncestor(element) {
     var current = element && element.parentElement;
     while (current && current !== global.document.body && current !== global.document.documentElement) {
@@ -565,21 +547,20 @@
     var target = candidates[targetIndex];
     var container = findScrollableAncestor(current || target);
     try {
-      var beforeScroll = container ? Number(container.scrollTop || 0) : Number(global.scrollY || global.pageYOffset || 0);
+      var beforeScroll = container ? readNativeScrollTop(container) : Number(global.scrollY || global.pageYOffset || 0);
       if (container) {
         var containerRect = container.getBoundingClientRect();
         var targetRect = target.getBoundingClientRect();
-        container.scrollTop = beforeScroll + targetRect.top - containerRect.top;
-      } else if (typeof target.scrollIntoView === "function") {
-        target.scrollIntoView({ block: "start", inline: "nearest", behavior: "auto" });
+        if (!writeNativeScrollTop(container, beforeScroll + targetRect.top - containerRect.top)) return false;
+      } else if (nativeScrollElementIntoView(target)) {
       } else return false;
-      var afterScroll = container ? Number(container.scrollTop || 0) : Number(global.scrollY || global.pageYOffset || 0);
+      var afterScroll = container ? readNativeScrollTop(container) : Number(global.scrollY || global.pageYOffset || 0);
       if (afterScroll === beforeScroll && target !== current) {
-        try { target.scrollIntoView({ block: "start", inline: "nearest", behavior: "auto" }); } catch (error) {}
-        afterScroll = container ? Number(container.scrollTop || 0) : Number(global.scrollY || global.pageYOffset || 0);
+        nativeScrollElementIntoView(target);
+        afterScroll = container ? readNativeScrollTop(container) : Number(global.scrollY || global.pageYOffset || 0);
       }
       if (afterScroll === beforeScroll) return false;
-      result.method = "image-native-scroll";
+      result.method = "browser-native-scroll";
       result.readerEngine = "image-sequence";
       result.imageIndex = targetIndex + 1;
       result.imageCount = candidates.length;
@@ -600,9 +581,9 @@
     var pathname = safeText(url.pathname, 240).toLowerCase();
     var fullUrl = safeText(url.href, 500).toLowerCase();
     var isChaoxing = /(^|\.)chaoxing\.com$/.test(hostname);
-    var isBookHost = isChaoxing || /(^|\.)sslibrary\.com$/.test(hostname);
+    var isBookHost = /(^|\.)sslibrary\.com$/.test(hostname);
     var isCourseShell = isChaoxing && /(\/mycourse\/studentstudy|\/nodedetailcontroller\/|\/ztnodedetailcontroller\/|\/knowledge\/cards)/.test(pathname);
-    var urlLooksLikeReader = /(?:^|[\/._?=&-])(book|ebook|reader|readweb|readsvr|jpath|pdz|pdzx|epub|bookview)(?:[\/._?=&-]|$)/i.test(fullUrl);
+    var urlLooksLikeReader = /(?:^|[\/._?=&-])(book|ebook|reader|readweb|readsvr|epub|bookview)(?:[\/._?=&-]|$)/i.test(fullUrl);
     var jpathController = getJpathController();
     var jpathParameters = getJpathParameters(jpathController);
     var currentCoordinate = currentJpathCoordinate(jpathController, jpathParameters);
@@ -616,23 +597,24 @@
     var markers = markerCount();
     var pairedStrongControls = !!previous && !!next && previous.confidence >= 2 && next.confidence >= 2;
     var genericPairedControls = !isChaoxing && !!previous && !!next;
-    var chaoxingActualReader = !!jpathController || jpathDomReady || markers >= 2 || pairedStrongControls;
+    var hasChaoxingReader = isChaoxing || chaoxingPdgReady || !!jpathController || jpathDomReady || !!queryFirst(["#Readweb", ".duxiuimg", "input.Jimg", "#pagejump"], false);
     var detected = mode === "chaoxing"
       ? chaoxingPdgReady
       : (mode === "image"
-        ? !isCourseShell && (!!jpathController || jpathDomReady || imageSequenceReady) && (urlLooksLikeReader || markers > 0 || !!jpathController || jpathDomReady)
-        : !isCourseShell && (isChaoxing ? chaoxingActualReader : (urlLooksLikeReader || !!jpathController || jpathDomReady || markers > 0 || pairedStrongControls || genericPairedControls)));
+        ? !hasChaoxingReader && imageSequenceReady && (urlLooksLikeReader || markers > 0)
+        : !hasChaoxingReader && (urlLooksLikeReader || markers > 0 || pairedStrongControls || genericPairedControls));
     var score = 0;
     if (urlLooksLikeReader) score += 70;
     if (isBookHost) score += 15;
     score += Math.min(markers, 4) * 15;
     if (pairedStrongControls) score += 30;
     else if (previous || next) score += 8;
-    if (jpathController) score += 120;
-    if (jpathDomReady) score += 110;
+    if (mode === "chaoxing" && jpathController) score += 120;
+    if (mode === "chaoxing" && jpathDomReady) score += 110;
     if (mode === "image" && imageSequenceReady) score += 100;
     if (mode === "chaoxing" && chaoxingPdgReady) score += 500;
     if (hostname === "epub.sslibrary.com" && pathname.indexOf("/epub/reader") >= 0) score += 60;
+    if (hasChaoxingReader && mode !== "chaoxing") score = -100;
     if (isCourseShell) score = -100;
     var requested = direction === "PREV" ? previous : next;
     var imageInfo = imagePosition(images);
@@ -643,37 +625,38 @@
       ok: detected,
       detected: detected,
       score: score,
-      reader: detected ? (mode === "chaoxing" ? "chaoxing-pdg" : (isBookHost ? "chaoxing-book" : "web-book")) : "",
-      readerEngine: mode === "chaoxing" ? "chaoxing-pdg-jpath" : ((jpathController || jpathDomReady) ? (mode === "image" ? "jpath-image" : "jpath-readweb") : (mode === "image" ? "image-sequence" : (hostname === "epub.sslibrary.com" ? "sslibrary-epub" : "dom-reader"))),
+      reader: detected ? (mode === "chaoxing" ? "chaoxing-pdg" : "web-book") : "",
+      readerEngine: mode === "chaoxing" ? "chaoxing-pdg-jpath" : (mode === "image" ? "image-sequence" : (hostname === "epub.sslibrary.com" ? "sslibrary-epub" : "dom-reader")),
       mode: mode,
       title: safeText(global.document && global.document.title, 120),
       frameUrl: hostname + pathname,
-      page: currentCoordinate ? String(currentCoordinate.page) : (currentPage() || (imageInfo.index >= 0 ? String(imageInfo.index + 1) : "")),
-      pageType: currentCoordinate ? String(currentCoordinate.type) : "",
-      pageTypeLabel: currentCoordinate ? jpathPageTypeLabel(currentCoordinate.type) : "",
-      pageJumpDetected: pageJump.detected,
-      pageJumpValue: pageJump.value,
-      pageJumpLabel: pageJump.label,
-      isBackCover: pageJump.isBackCover,
+      page: mode === "chaoxing" && currentCoordinate ? String(currentCoordinate.page) : (currentPage() || (imageInfo.index >= 0 ? String(imageInfo.index + 1) : "")),
+      pageType: mode === "chaoxing" && currentCoordinate ? String(currentCoordinate.type) : "",
+      pageTypeLabel: mode === "chaoxing" && currentCoordinate ? jpathPageTypeLabel(currentCoordinate.type) : "",
+      pageJumpDetected: mode === "chaoxing" && pageJump.detected,
+      pageJumpValue: mode === "chaoxing" ? pageJump.value : "",
+      pageJumpLabel: mode === "chaoxing" ? pageJump.label : "",
+      isBackCover: mode === "chaoxing" && pageJump.isBackCover,
       imageIndex: imageInfo.index >= 0 ? imageInfo.index + 1 : 0,
       imageCount: imageInfo.total,
-      canPrev: mode === "chaoxing" ? !!chaoxingPrevious : (mode === "image" ? (!!jpathController || jpathDomReady || imageInfo.index > 0) : (!!previous || !!jpathController || jpathDomReady)),
-      canNext: mode === "chaoxing" ? !!chaoxingNext : (mode === "image" ? (!!jpathController || jpathDomReady || (imageInfo.index >= 0 && imageInfo.index < imageInfo.total - 1)) : (!!next || !!jpathController || jpathDomReady)),
-      keyboardReady: mode === "book" && detected,
+      canPrev: mode === "chaoxing" ? !!chaoxingPrevious : (mode === "image" ? imageInfo.index > 0 : !!previous),
+      canNext: mode === "chaoxing" ? !!chaoxingNext : (mode === "image" ? (imageInfo.index >= 0 && imageInfo.index < imageInfo.total - 1) : !!next),
       selector: requested ? requested.selector : "",
-      method: mode === "chaoxing" ? (jpathController ? "chaoxing-pdg-native" : "chaoxing-pdg-force") : (jpathController ? "jpath-native-controller" : (requested ? "browser-native-click" : (detected ? "browser-native-keyboard" : ""))),
+      method: mode === "chaoxing"
+        ? (jpathController ? "chaoxing-pdg-native" : "chaoxing-pdg-force")
+        : (mode === "image" ? (detected ? "browser-native-scroll" : "") : (requested ? "browser-native-click" : "")),
       isCourseShell: isCourseShell,
       nativeController: true,
       controllerWorld: "MAIN",
       controllerVersion: CORE_VERSION,
       control: requested,
-      jpathControllerReady: !!jpathController,
-      jpathDomReady: jpathDomReady,
-      chaoxingPdgReady: chaoxingPdgReady,
-      pdgPageCount: chaoxingPdg ? chaoxingPdg.pages.length : 0,
-      pdgImageCount: chaoxingPdg ? chaoxingPdg.images.length : 0,
-      pdgSourceImageCount: chaoxingPdg ? chaoxingPdg.sourceImageCount : 0,
-      dynamicReaderFrame: !!(chaoxingPdg && chaoxingPdg.dynamicFrame),
+      jpathControllerReady: mode === "chaoxing" && !!jpathController,
+      jpathDomReady: mode === "chaoxing" && jpathDomReady,
+      chaoxingPdgReady: mode === "chaoxing" && chaoxingPdgReady,
+      pdgPageCount: mode === "chaoxing" && chaoxingPdg ? chaoxingPdg.pages.length : 0,
+      pdgImageCount: mode === "chaoxing" && chaoxingPdg ? chaoxingPdg.images.length : 0,
+      pdgSourceImageCount: mode === "chaoxing" && chaoxingPdg ? chaoxingPdg.sourceImageCount : 0,
+      dynamicReaderFrame: mode === "chaoxing" && !!(chaoxingPdg && chaoxingPdg.dynamicFrame),
       markerCount: markers,
       hostname: hostname
     };
@@ -695,50 +678,10 @@
       else if (typeof element.click === "function") element.click();
       else return false;
       result.method = "browser-native-click";
+      result.verified = true;
       return true;
     } catch (error) {
       result.nativeClickError = safeText(error && error.message || error, 160);
-      return false;
-    }
-  }
-
-  function triggerPageController(control, result) {
-    var element = control && control.element;
-    if (!element || typeof global.jQuery !== "function") return false;
-    try {
-      global.jQuery(element).trigger("click");
-      result.method = "page-native-controller";
-      return true;
-    } catch (error) {
-      result.pageControllerError = safeText(error && error.message || error, 160);
-      return false;
-    }
-  }
-
-  function dispatchNativeKeyboard(direction, result) {
-    var key = direction === "PREV" ? "ArrowLeft" : "ArrowRight";
-    var target = global.document.activeElement && global.document.activeElement !== global.document.body
-      ? global.document.activeElement
-      : (global.document.body || global.document.documentElement || global.document);
-    try {
-      if (target && typeof target.focus === "function") target.focus({ preventScroll: true });
-    } catch (error) {}
-    try {
-      var down = new NativeKeyboardEvent("keydown", { key: key, code: key, bubbles: true, cancelable: true });
-      var up = new NativeKeyboardEvent("keyup", { key: key, code: key, bubbles: true, cancelable: true });
-      if (typeof nativeDispatch === "function") {
-        nativeDispatch.call(target, down);
-        nativeDispatch.call(target, up);
-      } else {
-        target.dispatchEvent(down);
-        target.dispatchEvent(up);
-      }
-      result.method = "browser-native-keyboard";
-      result.key = key;
-      result.verified = false;
-      return false;
-    } catch (error) {
-      result.keyboardError = safeText(error && error.message || error, 160);
       return false;
     }
   }
@@ -766,27 +709,11 @@
       result.error = "CHAOXING_PDG_TURN_FAILED";
       return publicResult(result);
     }
-    if (result.jpathControllerReady && invokeJpathController(direction, result)) {
-      result.ok = true;
-      return publicResult(result);
-    }
-    if (result.jpathDomReady && forceJpathDomTurn(direction, result)) {
-      result.ok = true;
-      return publicResult(result);
-    }
     if (mode === "image" && moveImageSequence(direction, result)) {
       result.ok = true;
       return publicResult(result);
     }
     if (result.control && clickNative(result.control, result)) {
-      result.ok = true;
-      return publicResult(result);
-    }
-    if (result.control && triggerPageController(result.control, result)) {
-      result.ok = true;
-      return publicResult(result);
-    }
-    if (mode === "book" && dispatchNativeKeyboard(direction, result)) {
       result.ok = true;
       return publicResult(result);
     }

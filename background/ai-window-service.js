@@ -130,12 +130,13 @@
     function savePayload(request) {
       return new Promise(function (resolve, reject) {
         var payload = {};
-        var normalizer = global.WinSpeedBallTextNormalizer;
+        var normalizer = global.WinSpeedBallStructuredTextNormalizer;
         var content = String(request && request.content || "");
         if (normalizer && typeof normalizer.normalize === "function") content = normalizer.normalize(content);
         payload[storageKey] = {
           content: content,
-          updatedAt: Date.now()
+          updatedAt: Date.now(),
+          truncated: request && request.truncated === true
         };
         try {
           chrome.storage.session.set(payload, function () {

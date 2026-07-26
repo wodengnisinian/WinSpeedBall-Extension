@@ -11,7 +11,7 @@
   var featureGate = global.WinSpeedBallFeatureGate;
 
   function normalizeText(value) {
-    var normalizer = global.WinSpeedBallTextNormalizer;
+    var normalizer = global.WinSpeedBallStructuredTextNormalizer;
     return normalizer && typeof normalizer.normalize === "function"
       ? normalizer.normalize(value || "")
       : String(value || "").trim();
@@ -233,14 +233,14 @@
           aiJobError: "",
           aiJobUpdatedAt: Date.now()
         });
-        storage.appendLog("AI", "后台自动发送开始", {
+          storage.appendLog("AI", "后台自动发送开始", {
           任务: "#" + String(sourceTime).slice(-8),
           OCR字数: recognizedText.length,
           提示词字数: prompt.length
         });
         callAiWhenAvailable({ prompt: prompt, autoOcrSourceTime: sourceTime }, sourceTime, function (result) {
           if (result && result.ok && typeof global.WinSpeedBallShowAiReplyWindow === "function") {
-            global.WinSpeedBallShowAiReplyWindow({ content: result.content }, function () {});
+            global.WinSpeedBallShowAiReplyWindow({ content: result.content, truncated: result.truncated === true }, function () {});
           }
           storage.get(["manualCaptureTime", "ocrCancelledSourceTime"], function (current) {
             if (Number(current.manualCaptureTime || 0) !== sourceTime || Number(current.ocrCancelledSourceTime || 0) === sourceTime) return;

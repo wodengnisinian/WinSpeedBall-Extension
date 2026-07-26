@@ -111,6 +111,84 @@ test("固定按钮首次创建独立 popup 窗口", async () => {
   assert.equal(fixture.localData.pinnedPopupWindowState.open, true);
 });
 
+test("只有AI教学会放大固定窗口，返回后恢复普通尺寸", async () => {
+  const fixture = buildWindowService();
+  const opened = await fixture.service.openPinnedWindow();
+  const teaching = await fixture.service.setTeachingMode(true);
+  assert.equal(teaching.ok, true);
+  assert.equal(teaching.active, true);
+  assert.equal(teaching.teachingMode, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(teaching.bounds)), { width: 720, height: 600 });
+  assert.deepEqual(
+    { width: fixture.windows.get(opened.windowId).width, height: fixture.windows.get(opened.windowId).height },
+    { width: 720, height: 600 }
+  );
+  assert.equal(fixture.sessionData.pinnedPopupTeachingMode, true);
+
+  const normal = await fixture.service.setTeachingMode(false);
+  assert.equal(normal.ok, true);
+  assert.equal(normal.teachingMode, false);
+  assert.deepEqual(JSON.parse(JSON.stringify(normal.bounds)), { width: 320, height: 340 });
+  assert.deepEqual(
+    { width: fixture.windows.get(opened.windowId).width, height: fixture.windows.get(opened.windowId).height },
+    { width: 320, height: 340 }
+  );
+  assert.equal(fixture.sessionData.pinnedPopupTeachingMode, false);
+});
+
+test("教学界面切换使用当前固定窗口并恢复丢失的窗口编号", async () => {
+  const fixture = buildWindowService();
+  const opened = await fixture.service.openPinnedWindow();
+  delete fixture.sessionData.pinnedPopupWindowId;
+
+  const teaching = await fixture.service.setTeachingMode(true, opened.windowId);
+  assert.equal(teaching.ok, true);
+  assert.equal(teaching.active, true);
+  assert.equal(teaching.windowId, opened.windowId);
+  assert.equal(fixture.sessionData.pinnedPopupWindowId, opened.windowId);
+  assert.deepEqual(
+    { width: fixture.windows.get(opened.windowId).width, height: fixture.windows.get(opened.windowId).height },
+    { width: 720, height: 600 }
+  );
+
+  const normal = await fixture.service.setTeachingMode(false, opened.windowId);
+  assert.equal(normal.ok, true);
+  assert.deepEqual(
+    { width: fixture.windows.get(opened.windowId).width, height: fixture.windows.get(opened.windowId).height },
+    { width: 320, height: 340 }
+  );
+});
+
+test("并发教学尺寸请求按触发顺序执行并以最后一次为准", async () => {
+  const fixture = buildWindowService();
+  const opened = await fixture.service.openPinnedWindow();
+  const results = await Promise.all([
+    fixture.service.setTeachingMode(true, opened.windowId),
+    fixture.service.setTeachingMode(false, opened.windowId),
+    fixture.service.setTeachingMode(true, opened.windowId)
+  ]);
+
+  assert.equal(results.every((result) => result.ok), true);
+  assert.equal(fixture.sessionData.pinnedPopupTeachingMode, true);
+  assert.deepEqual(
+    { width: fixture.windows.get(opened.windowId).width, height: fixture.windows.get(opened.windowId).height },
+    { width: 720, height: 600 }
+  );
+});
+
+test("AI教学固定窗口被重新聚焦时仍保持大尺寸", async () => {
+  const fixture = buildWindowService();
+  const first = await fixture.service.openPinnedWindow();
+  await fixture.service.setTeachingMode(true);
+  Object.assign(fixture.windows.get(first.windowId), { width: 500, height: 400 });
+  const reopened = await fixture.service.openPinnedWindow();
+  assert.equal(reopened.reused, true);
+  assert.deepEqual(
+    { width: fixture.windows.get(first.windowId).width, height: fixture.windows.get(first.windowId).height },
+    { width: 720, height: 600 }
+  );
+});
+
 test("重复固定会聚焦已有窗口而不重复创建", async () => {
   const fixture = buildWindowService();
   const first = await fixture.service.openPinnedWindow();
@@ -216,6 +294,25 @@ test("消息 Schema 允许固定窗口页面但拒绝其他扩展页面", () => 
     url: "chrome-extension://extension-id/workspace/index.html"
   });
   assert.equal(other.ok, false);
+
+  const teachingMode = {
+    version: 1,
+    action: "setPinnedWindowTeachingMode",
+    source: "popup",
+    requestId: "teaching-window-test-123",
+    payload: { enabled: true }
+  };
+  assert.equal(context.self.WinSpeedBallMessageSchema.parse(teachingMode, {
+    id: "extension-id",
+    url: "chrome-extension://extension-id/popup/index.html?pinned=1"
+  }).ok, true);
+  assert.equal(context.self.WinSpeedBallMessageSchema.parse({
+    ...teachingMode,
+    payload: { enabled: "true" }
+  }, {
+    id: "extension-id",
+    url: "chrome-extension://extension-id/popup/index.html?pinned=1"
+  }).ok, false);
 });
 
 test("并发固定请求只创建一个窗口", async () => {
@@ -259,4 +356,5 @@ test("固定窗口忽略外部传入的其他尺寸", () => {
   const large = fixture.service.normalizeBounds({ width: 1920, height: 1080 });
   assert.deepEqual(JSON.parse(JSON.stringify(small)), { width: 320, height: 340 });
   assert.deepEqual(JSON.parse(JSON.stringify(large)), { width: 320, height: 340 });
+  assert.deepEqual(JSON.parse(JSON.stringify(fixture.service.teachingBounds)), { width: 720, height: 600 });
 });

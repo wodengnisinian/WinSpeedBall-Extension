@@ -3,6 +3,7 @@
 
   function runInFrame(turnDirection) {
     turnDirection = String(turnDirection || "DETECT").toUpperCase();
+    var nativeClick = typeof HTMLElement !== "undefined" && HTMLElement.prototype && HTMLElement.prototype.click;
 
     function safeText(value, maxLength) {
       return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength || 160);
@@ -86,7 +87,7 @@
     var pathname = safeText(url.pathname, 240).toLowerCase();
     var fullUrl = safeText(url.href, 500).toLowerCase();
     var isChaoxing = /(^|\.)chaoxing\.com$/.test(hostname);
-    var isChaoxingBookHost = isChaoxing || /(^|\.)sslibrary\.com$/.test(hostname);
+    var isSupportedBookHost = /(^|\.)sslibrary\.com$/.test(hostname);
     var isCourseShell = isChaoxing && /(\/mycourse\/studentstudy|\/nodedetailcontroller\/|\/ztnodedetailcontroller\/|\/knowledge\/cards)/.test(pathname);
     var urlLooksLikeReader = /(?:^|[\/._?=&-])(book|ebook|reader|readweb|pdz|pdzx|epub|bookview)(?:[\/._?=&-]|$)/i.test(fullUrl);
 
@@ -96,25 +97,23 @@
       "canvas.page", ".page-container canvas", ".page-container img"
     ];
     var markerCount = 0;
-    var focusTarget = null;
     markerSelectors.forEach(function (selector) {
       if (markerCount >= 8) return;
       var marker = queryUsable(selector);
       if (!marker) return;
       markerCount += 1;
-      if (!focusTarget) focusTarget = marker;
     });
 
     var pairedStrongControls = !!prevControl && !!nextControl && prevControl.confidence >= 2 && nextControl.confidence >= 2;
     var genericPairedControls = !isChaoxing && !!prevControl && !!nextControl;
-    var detected = !isCourseShell && (urlLooksLikeReader || markerCount > 0 || pairedStrongControls || genericPairedControls);
+    var detected = !isChaoxing && (urlLooksLikeReader || markerCount > 0 || pairedStrongControls || genericPairedControls);
     var score = 0;
     if (urlLooksLikeReader) score += 70;
-    if (isChaoxingBookHost) score += 15;
+    if (isSupportedBookHost) score += 15;
     score += Math.min(markerCount, 4) * 15;
     if (pairedStrongControls) score += 30;
     else if (prevControl || nextControl) score += 8;
-    if (isCourseShell) score = -100;
+    if (isChaoxing) score = -100;
 
     var pageText = "";
     var pageSelectors = ["#zcontent-js iframe[data-index]", "#currentPage", "#pageNow", ".current-page", ".page-current", "input[name='page']", "[data-current-page]"];
@@ -129,15 +128,14 @@
       ok: detected,
       detected: detected,
       score: score,
-      reader: detected ? (isChaoxingBookHost ? "chaoxing-book" : "web-book") : "",
+      reader: detected ? "web-book" : "",
       title: safeText(document.title, 120),
       frameUrl: hostname + pathname,
       page: pageText,
       canPrev: !!prevControl,
       canNext: !!nextControl,
-      keyboardReady: detected,
       selector: requestedControl ? requestedControl.selector : "",
-      method: requestedControl ? "button" : (detected ? "keyboard" : ""),
+      method: requestedControl ? "browser-native-click" : "",
       isCourseShell: isCourseShell
     };
 
@@ -150,34 +148,18 @@
 
     if (requestedControl) {
       try {
-        requestedControl.element.click();
+        if (typeof nativeClick !== "function") throw new Error("Native click is unavailable.");
+        nativeClick.call(requestedControl.element);
         baseResult.ok = true;
-        baseResult.method = "button";
+        baseResult.method = "browser-native-click";
         return baseResult;
       } catch (error) {
-        baseResult.error = "BOOK_BUTTON_CLICK_FAILED";
+        baseResult.nativeClickError = safeText(error && error.message || error, 160);
       }
     }
-
-    var key = turnDirection === "PREV" ? "ArrowLeft" : "ArrowRight";
-    var target = document.activeElement && document.activeElement !== document.body ? document.activeElement : (focusTarget || document.body || document.documentElement);
-    try {
-      if (target && typeof target.focus === "function") target.focus({ preventScroll: true });
-    } catch (error) {}
-    try {
-      var down = new KeyboardEvent("keydown", { key: key, code: key, bubbles: true, cancelable: true });
-      var up = new KeyboardEvent("keyup", { key: key, code: key, bubbles: true, cancelable: true });
-      (target || document).dispatchEvent(down);
-      (target || document).dispatchEvent(up);
-      baseResult.ok = true;
-      baseResult.method = "keyboard";
-      baseResult.key = key;
-      return baseResult;
-    } catch (error) {
-      baseResult.ok = false;
-      baseResult.error = "BOOK_KEYBOARD_DISPATCH_FAILED";
-      return baseResult;
-    }
+    baseResult.ok = false;
+    baseResult.error = "BOOK_NATIVE_CONTROL_FAILED";
+    return baseResult;
   }
 
   function selectFrame(injectionResults, direction) {
@@ -186,7 +168,7 @@
       var result = entry && entry.result;
       if (!result || !result.detected) return false;
       if (direction === "DETECT") return true;
-      return direction === "PREV" ? (result.canPrev || result.keyboardReady) : (result.canNext || result.keyboardReady);
+      return direction === "PREV" ? result.canPrev : result.canNext;
     });
     candidates.sort(function (left, right) {
       var scoreDifference = Number(right.result.score || 0) - Number(left.result.score || 0);

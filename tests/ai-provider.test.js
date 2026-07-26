@@ -77,6 +77,28 @@ function loadProviders(fetchImpl) {
   return context;
 }
 
+test("普通 AI 回复中的公式要求使用标准 LaTeX", () => {
+  const source = fs.readFileSync(path.join(ROOT, "background", "ai-providers.js"), "utf8");
+  assert.match(source, /whenever a response contains a mathematical, physical, chemical, statistical, or scientific formula/i);
+  assert.match(source, /use \\\\\(\.\.\.\\\\\) for inline formulas/);
+  assert.match(source, /\\\\ce\{\.\.\.\} for chemical equations/);
+  assert.match(source, /Do not imitate superscripts or fractions with plain text/);
+});
+
+test("AI答题系统指令允许直接解题并严格执行用户回复要求", () => {
+  const source = fs.readFileSync(path.join(ROOT, "background", "ai-providers.js"), "utf8");
+  assert.match(source, /AI question-answering and study assistant/);
+  assert.match(source, /Answer or solve questions that the user intentionally sends/);
+  assert.match(source, /Follow every explicit user requirement exactly/);
+  assert.match(source, /whether only the final answer is wanted/);
+  assert.match(source, /user's explicit requirements take priority over the default task wording/);
+  assert.match(source, /For a direct question-answering task, return only the shortest valid final answer/);
+  assert.match(source, /unless the user explicitly asks for reasoning, an explanation, steps/);
+  assert.match(source, /silently verify that the response satisfies all explicit requirements/);
+  assert.match(source, /never click, select, fill, submit, or otherwise operate a webpage/);
+  assert.doesNotMatch(source, /Do not help with cheating, auto answering/);
+});
+
 function createStorage(initial) {
   const data = Object.assign({}, initial || {});
   const writes = [];
@@ -110,7 +132,7 @@ function loadAiService(initial, options) {
   runScript(context, "background/ai-providers.js");
   if (options.realTextNormalizer) {
     runScript(context, "vendor/opencc/opencc-full-1.4.1.js");
-    runScript(context, "voice/text-filter.js");
+    runScript(context, "shared/structured-text-normalizer.js");
   }
   runScript(context, "background/ai-service.js");
   return { context, service: context.WinSpeedBallAiService, storage };
@@ -231,6 +253,50 @@ test("Claude 将 system 提升为顶层字段并发送必需 headers", async () 
   assert.equal(body.max_tokens, 2048);
 });
 
+test("Claude Sonnet 5 AI教学省略非默认采样参数，其他模型与 Provider 保留 temperature", async () => {
+  const requests = [];
+  const providers = loadProviders(async (url, options) => {
+    requests.push({ url, body: JSON.parse(options.body) });
+    return url.includes("anthropic.com")
+      ? claudeSuccess([{ type: "text", text: "教学回复" }])
+      : openAiSuccess("教学回复");
+  }).WinSpeedBallAiProviders;
+  const teachingRequest = {
+    messages: [
+      { role: "system", content: "请分步教学。" },
+      { role: "user", content: "解方程：2x + 3 = 7" }
+    ],
+    temperature: 0.3,
+    top_p: 0.8,
+    top_k: 40
+  };
+
+  const claude = await providers.create({
+    provider: "claude",
+    apiKey: "claude-key",
+    model: "claude-sonnet-5"
+  }).chat(teachingRequest);
+  const openai = await providers.create({
+    provider: "openai",
+    apiKey: "openai-key",
+    model: "gpt-compatible"
+  }).chat(teachingRequest);
+  const earlierClaude = await providers.create({
+    provider: "claude",
+    apiKey: "claude-key",
+    model: "claude-3-7-sonnet-latest"
+  }).chat(teachingRequest);
+
+  assert.equal(claude.ok, true);
+  assert.equal(openai.ok, true);
+  assert.equal(earlierClaude.ok, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(requests[0].body, "temperature"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(requests[0].body, "top_p"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(requests[0].body, "top_k"), false);
+  assert.equal(requests[1].body.temperature, 0.3);
+  assert.equal(requests[2].body.temperature, 0.3);
+});
+
 test("OpenAI 兼容响应被归一化", async () => {
   const providers = loadProviders(async () => openAiSuccess([
     { type: "text", text: "part one" },
@@ -246,6 +312,21 @@ test("OpenAI 兼容响应被归一化", async () => {
   assert.equal(result.model, "response-model");
   assert.equal(result.requestId, "openai-request");
   assert.equal(result.usage.totalTokens, 5);
+});
+
+test("Provider 明确返回达到输出上限时标记回复不完整", async () => {
+  const providers = loadProviders(async () => response({
+    body: {
+      model: "response-model",
+      choices: [{ message: { content: "只返回了前半部分" }, finish_reason: "length" }]
+    }
+  })).WinSpeedBallAiProviders;
+  const result = await providers.create({ provider: "openai", apiKey: "key" }).chat({
+    messages: [{ role: "user", content: "回答第1至20题" }]
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.truncated, true);
+  assert.equal(result.finishReason, "length");
 });
 
 test("Claude 响应被归一化", async () => {
@@ -340,14 +421,14 @@ test("超大 AI 响应在流式读取阶段被取消", async () => {
   assert.equal(cancelled, true);
 });
 
-test("AI 回复在返回和保存前统一为简体中文或正常英文", async () => {
+test("AI 回复在返回和保存前保留公式结构、兼容字符和指定语言", async () => {
   const { service } = loadAiService({ deepseekApiKey: "key" }, {
     realTextNormalizer: true,
-    fetch: async () => openAiSuccess("繁體回答\nEnglish 𝕋𝕖𝕤𝕥\n한국어")
+    fetch: async () => openAiSuccess("繁體回答：\\(c^2=\\frac{a}{b}\\)\nEnglish 𝕋𝕖𝕤𝕥\n한국어")
   });
   const result = await callbackResult((done) => service.call({ prompt: "question" }, done));
   assert.equal(result.ok, true);
-  assert.equal(result.content, "繁体回答\nEnglish Test");
+  assert.equal(result.content, "繁體回答：\\(c^2=\\frac{a}{b}\\)\nEnglish 𝕋𝕖𝕤𝕥\n한국어");
 });
 
 test("单次 AI 请求可以指定 Provider 且不改动默认服务", async () => {
@@ -372,6 +453,29 @@ test("单次 AI 请求可以指定 Provider 且不改动默认服务", async () 
   assert.equal(result.provider, "openai");
   assert.equal(requestedUrl, "https://api.openai.com/v1/chat/completions");
   assert.equal(storage.data.aiProvider, "deepseek");
+});
+
+test("AI答题请求把要求优先级指令作为最高层消息发送给 Provider", async () => {
+  let requestBody;
+  const { service } = loadAiService({
+    deepseekApiKey: "key"
+  }, {
+    fetch: async (_url, options) => {
+      requestBody = JSON.parse(options.body);
+      return openAiSuccess("B");
+    }
+  });
+
+  const result = await callbackResult((done) => service.call({
+    prompt: "只输出选项字母，不要解释。\n\n题目：1+1 等于多少？A.1 B.2"
+  }, done));
+
+  assert.equal(result.ok, true);
+  assert.equal(requestBody.messages[0].role, "system");
+  assert.match(requestBody.messages[0].content, /Follow every explicit user requirement exactly/);
+  assert.match(requestBody.messages[0].content, /Do not add explanations, headings, disclaimers/);
+  assert.equal(requestBody.messages[1].role, "user");
+  assert.match(requestBody.messages[1].content, /只输出选项字母，不要解释/);
 });
 
 test("旧 deepseek 配置迁移到新版配置且保留旧键", async () => {
@@ -463,6 +567,7 @@ test("消息 Schema 同时支持通用和旧版 AI 动作", () => {
     ["saveAiSettings", { provider: "openai", apiKey: "key", baseUrl: "https://api.openai.com/v1", model: "gpt-test" }],
     ["testAI", {}],
     ["askAI", { provider: "openai", prompt: "hello", task: "summary" }],
+    ["askAiTeaching", { provider: "openai", messages: [{ role: "user", content: "请分步教学" }], temperature: 0.3 }],
     ["saveApiKey", { provider: "deepseek", apiKey: "key" }],
     ["testDeepSeek", {}],
     ["askDeepSeek", { prompt: "hello" }]

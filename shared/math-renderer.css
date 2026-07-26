@@ -1,0 +1,57 @@
+/*
+ * 公式在 AI答题、AI教学和独立回复窗口中共用同一套强化样式。
+ * SVG 字形使用轻微描边增重，避免只设置 font-weight 时对矢量路径无效。
+ */
+.math-render-surface .ai-teaching-formula-source {
+  color: #000;
+}
+
+.math-render-surface mjx-container[jax="SVG"] {
+  max-width: 100%;
+  color: #000 !important;
+  font-size: 1.28em !important;
+  font-weight: 800;
+}
+
+.math-render-surface mjx-container[jax="SVG"] > svg {
+  color: #000 !important;
+  overflow: visible;
+}
+
+.math-render-surface mjx-container[jax="SVG"] svg path,
+.math-render-surface mjx-container[jax="SVG"] svg use {
+  fill: currentColor !important;
+  stroke: currentColor;
+  stroke-width: 10;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  paint-order: stroke fill;
+}
+
+.math-render-surface .ai-teaching-formula-group {
+  display: grid;
+  gap: 6px;
+  text-align: left;
+}
+
+.math-render-surface .ai-teaching-formula-row {
+  min-width: 0;
+}
+
+.math-render-surface .ai-teaching-formula-group .ai-teaching-formula-row mjx-container[jax="SVG"][display="true"] {
+  margin: 0;
+  padding: 2px 0;
+  border: 0;
+  text-align: left;
+}
+
+.math-render-surface .ai-teaching-formula-group .ai-teaching-formula-row mjx-container[jax="SVG"][display="true"] > svg {
+  margin: 0;
+}
+
+.math-render-surface.ai-teaching-formula-fallback .ai-teaching-formula-source {
+  color: #000;
+  font-size: 1.28em;
+  font-weight: 800;
+  line-height: 1.5;
+}

@@ -48,6 +48,32 @@ test("SDK 上下文确认绑定标签页、来源和能力且只能消费一次"
   assert.equal((await fixture.service.consume(prepared.contextNonce, ["video.read", "page.read"])).code, "SDK_CONTEXT_NONCE_INVALID");
 });
 
+test("图书上下文确认绑定唯一阅读模式且非图书上下文拒绝多余模式", async () => {
+  const fixture = buildService();
+  const prepared = await fixture.service.prepare(["book.control"], "image");
+  assert.equal(prepared.ok, true);
+  assert.equal(prepared.bookMode, "image");
+  assert.equal(fixture.getIntents()[prepared.contextNonce].bookMode, "image");
+
+  const consumed = await fixture.service.consume(prepared.contextNonce, ["book.control"], "image");
+  assert.equal(consumed.ok, true);
+  assert.equal(consumed.bookMode, "image");
+
+  const mismatchFixture = buildService();
+  const mismatch = await mismatchFixture.service.prepare(["book.read"], "chaoxing");
+  const mismatchResult = await mismatchFixture.service.consume(mismatch.contextNonce, ["book.read"], "book");
+  assert.equal(mismatchResult.code, "SDK_CONTEXT_BOOK_MODE_MISMATCH");
+
+  const missingFixture = buildService();
+  assert.equal((await missingFixture.service.prepare(["book.read"])).code, "SDK_BOOK_MODE_REQUIRED");
+  assert.equal((await missingFixture.service.prepare(["video.read"], "book")).code, "SDK_BOOK_MODE_UNEXPECTED");
+
+  const extraConsumeFixture = buildService();
+  const videoContext = await extraConsumeFixture.service.prepare(["video.read"]);
+  assert.equal(videoContext.ok, true);
+  assert.equal((await extraConsumeFixture.service.consume(videoContext.contextNonce, ["video.read"], "image")).code, "SDK_BOOK_MODE_UNEXPECTED");
+});
+
 test("确认后页面来源变化会拒绝创建 SDK 会话", async () => {
   const fixture = buildService();
   const prepared = await fixture.service.prepare(["video.read"]);

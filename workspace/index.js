@@ -15,14 +15,97 @@
   var workspacePortPost = null;
   var workspaceRunId = "";
   var workspaceHasRun = false;
+  var workspacePermissions = [];
+  var workspaceScrollSurface = null;
   var SCRIPT_WORKSPACE_CHANNEL = "WSB_LEGACY_WORKSPACE";
   var SCRIPT_WORKSPACE_PROTOCOL_VERSION = 1;
+  var ALLOWED_PERMISSIONS = ["dom", "network", "automation"];
+  var NETWORK_GLOBALS = [
+    "fetch", "XMLHttpRequest", "WebSocket", "WebSocketStream", "EventSource",
+    "WebTransport", "Worker", "SharedWorker", "open"
+  ];
+
+  function normalizeWorkspacePermissions(value) {
+    if (!Array.isArray(value) || value.indexOf("dom") < 0) return null;
+    var permissions = [];
+    for (var index = 0; index < value.length; index += 1) {
+      if (typeof value[index] !== "string" ||
+          ALLOWED_PERMISSIONS.indexOf(value[index]) < 0 ||
+          permissions.indexOf(value[index]) >= 0) return null;
+      permissions.push(value[index]);
+    }
+    return permissions.sort();
+  }
+
+  function hasWorkspacePermission(permission) {
+    return workspacePermissions.indexOf(permission) >= 0;
+  }
+
+  function applyWorkspaceNetworkPolicy() {
+    if (hasWorkspacePermission("network")) return;
+    var policy = document.createElement("meta");
+    policy.httpEquiv = "Content-Security-Policy";
+    policy.content = "default-src 'none'; script-src 'unsafe-eval'; style-src 'unsafe-inline'; " +
+      "img-src data: blob:; media-src data: blob:; connect-src 'none'; object-src 'none'; " +
+      "frame-src 'none'; child-src 'none'; form-action 'none'; base-uri 'none'";
+    policy.setAttribute("data-wsb-runtime", "network-policy");
+    document.head.appendChild(policy);
+  }
+
+  function ensureWorkspaceScrollChrome() {
+    var progress = document.getElementById("workspaceScrollProgress");
+    var topButton = document.getElementById("workspaceScrollTopBtn");
+    if (!progress) {
+      progress = document.createElement("div");
+      progress.id = "workspaceScrollProgress";
+      progress.className = "ws-scroll-progress";
+      progress.hidden = true;
+      progress.setAttribute("data-wsb-shell", "");
+      progress.setAttribute("role", "progressbar");
+      progress.setAttribute("aria-label", "脚本工作区阅读进度");
+      progress.appendChild(document.createElement("span"));
+      document.body.appendChild(progress);
+    }
+    if (!topButton) {
+      topButton = document.createElement("button");
+      topButton.id = "workspaceScrollTopBtn";
+      topButton.className = "ws-scroll-top";
+      topButton.type = "button";
+      topButton.hidden = true;
+      topButton.textContent = "回到顶部";
+      topButton.setAttribute("data-wsb-shell", "");
+      topButton.setAttribute("aria-controls", "root");
+      document.body.appendChild(topButton);
+    }
+    return { progress: progress, topButton: topButton };
+  }
+
+  function bindWorkspaceScrollSurface() {
+    if (!root || !self.WinSpeedBallScrollSurface) return;
+    var chrome = ensureWorkspaceScrollChrome();
+    if (workspaceScrollSurface) workspaceScrollSurface.destroy();
+    root.tabIndex = 0;
+    root.setAttribute("role", "region");
+    root.setAttribute("aria-label", "脚本工作区，可使用滚轮、触控板或键盘翻页");
+    workspaceScrollSurface = self.WinSpeedBallScrollSurface.create({
+      element: root,
+      progress: chrome.progress,
+      topButton: chrome.topButton,
+      observeMutations: true
+    });
+  }
 
   function ensureRoot() {
-    if (root && root.isConnected) return root;
+    if (root && root.isConnected) {
+      if (!document.getElementById("workspaceScrollProgress") || !document.getElementById("workspaceScrollTopBtn")) {
+        bindWorkspaceScrollSurface();
+      }
+      return root;
+    }
     root = document.createElement("div");
     root.id = "root";
     document.body.insertBefore(root, document.body.firstChild || null);
+    bindWorkspaceScrollSurface();
     return root;
   }
 
@@ -42,6 +125,8 @@
     });
     ensureRoot();
     root.innerHTML = "";
+    root.scrollTop = 0;
+    bindWorkspaceScrollSurface();
   }
 
   function makeBox(className, value) {
@@ -100,6 +185,8 @@
     var note = document.createElement("div");
     note.className = "ws-note";
     note.setAttribute("data-wsb-runtime", "1");
+    note.tabIndex = 0;
+    note.setAttribute("aria-label", "脚本通知，可滚动阅读");
     note.textContent = value;
     document.body.appendChild(note);
     setTimeout(function () { note.remove(); }, 3000);
@@ -144,6 +231,7 @@
     var menuArea = null;
     var menuSeq = 0;
     var storagePrefix = "wsb:" + (payload.name || "script") + ":";
+    var networkAllowed = hasWorkspacePermission("network");
 
     window.unsafeWindow = scriptWindowFacade;
     window.GM_info = {
@@ -163,9 +251,13 @@
     window.GM_deleteValue = function (key) {
       delete gmValueStore[storagePrefix + key];
     };
-    window.GM_openInTab = function (url) {
-      window.open(String(url || ""), "_blank");
-    };
+    try { delete window.GM_openInTab; } catch (e) {}
+    try { delete window.GM_xmlhttpRequest; } catch (e) {}
+    if (networkAllowed) {
+      window.GM_openInTab = function (url) {
+        window.open(String(url || ""), "_blank");
+      };
+    }
     window.GM_notification = function (detail) {
       createNotification(typeof detail === "string" ? detail : (detail && (detail.text || detail.title)) || "通知");
     };
@@ -187,31 +279,36 @@
       var btn = document.querySelector('[data-menu-id="' + String(id).replace(/"/g, '\\"') + '"]');
       if (btn) btn.remove();
     };
-    window.GM_xmlhttpRequest = function (detail) {
-      detail = detail || {};
-      fetch(detail.url, {
-        method: detail.method || "GET",
-        headers: detail.headers || {},
-        body: detail.data
-      }).then(function (resp) {
-        return resp.text().then(function (text) {
-          var result = { status: resp.status, statusText: resp.statusText, responseText: text, finalUrl: resp.url };
-          if (typeof detail.onload === "function") detail.onload(result);
+    if (networkAllowed) {
+      window.GM_xmlhttpRequest = function (detail) {
+        detail = detail || {};
+        fetch(detail.url, {
+          method: detail.method || "GET",
+          headers: detail.headers || {},
+          body: detail.data
+        }).then(function (resp) {
+          return resp.text().then(function (text) {
+            var result = { status: resp.status, statusText: resp.statusText, responseText: text, finalUrl: resp.url };
+            if (typeof detail.onload === "function") detail.onload(result);
+          });
+        }).catch(function (error) {
+          if (typeof detail.onerror === "function") detail.onerror(error);
         });
-      }).catch(function (error) {
-        if (typeof detail.onerror === "function") detail.onerror(error);
-      });
-    };
-    window.GM = {
+      };
+    }
+    var gm = {
       addStyle: gmAddStyle,
       getValue: function (key, fallback) { return Promise.resolve(window.GM_getValue(key, fallback)); },
       setValue: function (key, value) { window.GM_setValue(key, value); return Promise.resolve(); },
       deleteValue: function (key) { window.GM_deleteValue(key); return Promise.resolve(); },
-      xmlHttpRequest: window.GM_xmlhttpRequest,
       notification: window.GM_notification,
-      openInTab: window.GM_openInTab,
       registerMenuCommand: window.GM_registerMenuCommand
     };
+    if (networkAllowed) {
+      gm.xmlHttpRequest = window.GM_xmlhttpRequest;
+      gm.openInTab = window.GM_openInTab;
+    }
+    window.GM = Object.freeze(gm);
   }
 
   function isWorkspaceEnvelope(data, allowedTypes) {
@@ -236,6 +333,7 @@
   }
 
   function forwardLegacyPostMessage(message) {
+    if (!hasWorkspacePermission("automation")) return;
     if (!message || typeof message !== "object" || Array.isArray(message)) return;
     if (message.source !== "DouyinPanelScript") return;
     if (["START", "STOP", "NEXT", "SET_INTERVAL", "GET_STATE"].indexOf(message.action) < 0) return;
@@ -246,16 +344,27 @@
 
   function createScriptFacades() {
     var parentFacade = Object.freeze({ postMessage: forwardLegacyPostMessage });
+    var networkAllowed = hasWorkspacePermission("network");
+    var navigatorFacade = new Proxy(window.navigator, {
+      get: function (target, key) {
+        if (!networkAllowed && key === "sendBeacon") return undefined;
+        var value = target[key];
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    });
     var scriptWindowFacade;
     scriptWindowFacade = new Proxy(Object.create(null), {
       get: function (_target, key) {
         if (key === "parent" || key === "top") return parentFacade;
         if (key === "window" || key === "self" || key === "globalThis") return scriptWindowFacade;
+        if (key === "navigator") return navigatorFacade;
+        if (!networkAllowed && NETWORK_GLOBALS.indexOf(key) >= 0) return undefined;
         var value = window[key];
         return typeof value === "function" ? value.bind(window) : value;
       },
       set: function (_target, key, value) {
         if (key === "parent" || key === "top") return false;
+        if (!networkAllowed && NETWORK_GLOBALS.indexOf(key) >= 0) return false;
         window[key] = value;
         return true;
       },
@@ -267,10 +376,11 @@
         return delete window[key];
       }
     });
-    return { parent: parentFacade, window: scriptWindowFacade };
+    return { parent: parentFacade, window: scriptWindowFacade, navigator: navigatorFacade };
   }
 
   function dispatchLegacyBridgeState(payload) {
+    if (!hasWorkspacePermission("automation")) return;
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
     nativeWinDispatch(new NativeMessageEvent("message", {
       data: payload,
@@ -282,16 +392,35 @@
     restorePatchedApis();
     clearWorkspace();
     try {
+      workspacePermissions = normalizeWorkspacePermissions(payload.permissions) || [];
+      if (workspacePermissions.indexOf("dom") < 0) throw new Error("脚本工作区拒绝了无 dom 基础权限的脚本。");
+      applyWorkspaceNetworkPolicy();
       patchReadyEvents();
       patchDocumentWrite();
       var facades = createScriptFacades();
       installGmApis(payload, facades.window);
-      new Function("window", "parent", "top", "self", "globalThis", String(payload.code || ""))(
+      new Function(
+        "window", "parent", "top", "self", "globalThis", "navigator",
+        "fetch", "XMLHttpRequest", "WebSocket", "WebSocketStream", "EventSource",
+        "WebTransport", "Worker", "SharedWorker", "open",
+        String(payload.code || "")
+      ).call(
+        facades.window,
         facades.window,
         facades.parent,
         facades.parent,
         facades.window,
-        facades.window
+        facades.window,
+        facades.navigator,
+        hasWorkspacePermission("network") && typeof window.fetch === "function" ? window.fetch.bind(window) : undefined,
+        hasWorkspacePermission("network") ? window.XMLHttpRequest : undefined,
+        hasWorkspacePermission("network") ? window.WebSocket : undefined,
+        hasWorkspacePermission("network") ? window.WebSocketStream : undefined,
+        hasWorkspacePermission("network") ? window.EventSource : undefined,
+        hasWorkspacePermission("network") ? window.WebTransport : undefined,
+        hasWorkspacePermission("network") ? window.Worker : undefined,
+        hasWorkspacePermission("network") ? window.SharedWorker : undefined,
+        hasWorkspacePermission("network") && typeof window.open === "function" ? window.open.bind(window) : undefined
       );
       setTimeout(function () { showNoUiHint(payload.name); }, 800);
       sendWorkspaceMessage("RESULT", { ok: true, name: payload.name || "" });
@@ -311,12 +440,19 @@
     });
   }, true);
 
+  bindWorkspaceScrollSurface();
+
   function handleWorkspacePortMessage(event) {
     var data = event.data;
     if (!isWorkspaceEnvelope(data, ["RUN_SCRIPT_UI", "BRIDGE_STATE", "TERMINATE"])) return;
     if (data.type === "RUN_SCRIPT_UI") {
-      if (workspaceHasRun || Object.keys(data.payload).some(function (key) { return ["name", "code"].indexOf(key) < 0; })) return;
-      if (typeof data.payload.name !== "string" || typeof data.payload.code !== "string" || data.payload.code.length > 200000) return;
+      if (workspaceHasRun || Object.keys(data.payload).some(function (key) {
+        return ["name", "code", "permissions"].indexOf(key) < 0;
+      })) return;
+      if (typeof data.payload.name !== "string" ||
+          typeof data.payload.code !== "string" ||
+          data.payload.code.length > 200000 ||
+          !normalizeWorkspacePermissions(data.payload.permissions)) return;
       workspaceHasRun = true;
       runScript(data.payload);
       return;
@@ -331,6 +467,7 @@
       workspacePort = null;
       workspacePortPost = null;
       workspaceRunId = "";
+      workspacePermissions = [];
     }
   }
 

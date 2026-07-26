@@ -1,7 +1,19 @@
 (function (global) {
   "use strict";
 
-  var SYSTEM_PROMPT = "You are a study assistant. Help with understanding, summary, explanation, key point extraction, and translation only. Do not help with cheating, auto answering, or auto submitting forms.";
+  var SYSTEM_PROMPT = [
+    "You are an AI question-answering and study assistant.",
+    "Answer or solve questions that the user intentionally sends to you; do not refuse merely because the content looks like homework, an exercise, a quiz, or an exam-style question.",
+    "Follow every explicit user requirement exactly, including the requested language, output format, answer scope, length, item count, whether reasoning is required, whether only the final answer is wanted, and requirements written in the question itself.",
+    "If instructions conflict, the user's explicit requirements take priority over the default task wording and the supplied source material.",
+    "Do not add explanations, headings, disclaimers, repeated question text, or other content that the user has asked you to omit.",
+    "For a direct question-answering task, return only the shortest valid final answer unless the user explicitly asks for reasoning, an explanation, steps, or a detailed format; summary, explanation, key-point extraction, and translation tasks keep their requested structure.",
+    "Before responding, silently verify that the response satisfies all explicit requirements; do not print this verification.",
+    "If the requested question range or required source information is missing, state exactly what is missing instead of guessing or silently changing the requested range.",
+    "You may provide answers and reasoning, but never click, select, fill, submit, or otherwise operate a webpage on the user's behalf.",
+    "Unless the user explicitly requests a different representation or a strict plain-text or machine-readable format, whenever a response contains a mathematical, physical, chemical, statistical, or scientific formula, write it as standard LaTeX: use \\(...\\) for inline formulas, \\[...\\] for display formulas, and \\ce{...} for chemical equations.",
+    "Do not imitate superscripts or fractions with plain text."
+  ].join(" ");
   var MAX_REQUEST_LENGTH = 512 * 1024;
   var MAX_RESPONSE_LENGTH = 2 * 1024 * 1024;
   var REQUEST_TIMEOUT_MS = 45000;
@@ -263,6 +275,11 @@
     return { system: system.join("\n\n"), messages: conversation };
   }
 
+  function rejectsCustomSampling(definition, model) {
+    return definition.protocol === "anthropic-messages" &&
+      /^claude-sonnet-5(?:$|[-._:])/i.test(String(model || "").trim());
+  }
+
   function AIProvider(definition, config) {
     this.definition = definition;
     this.id = definition.id;
@@ -299,7 +316,9 @@
       if (this.apiKey) headers.Authorization = "Bearer " + this.apiKey;
       body = { model: this.model, messages: request.messages, stream: false };
     }
-    if (request.temperature != null) body.temperature = request.temperature;
+    if (request.temperature != null && !rejectsCustomSampling(definition, this.model)) {
+      body.temperature = request.temperature;
+    }
 
     var bodyText = JSON.stringify(body);
     if (bodyText.length > MAX_REQUEST_LENGTH) {

@@ -11,6 +11,8 @@
     "WORKER_INIT",
     "RUN",
     "STARTED",
+    "HEARTBEAT_PING",
+    "HEARTBEAT_PONG",
     "SDK_REQUEST",
     "RPC_RESULT",
     "EVENT",
@@ -19,7 +21,7 @@
     "TERMINATE",
     "TERMINATED"
   ]);
-  var DEFAULT_TIMEOUT_MS = 5000;
+  var DEFAULT_TIMEOUT_MS = 0;
   var MIN_TIMEOUT_MS = 100;
   var MAX_TIMEOUT_MS = 30000;
 
@@ -83,8 +85,10 @@
   }
 
   function normalizeTimeout(value) {
+    if (value == null || value === "") return DEFAULT_TIMEOUT_MS;
     var number = Number(value);
     if (!Number.isFinite(number)) return DEFAULT_TIMEOUT_MS;
+    if (number <= 0) return 0;
     return Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.round(number)));
   }
 

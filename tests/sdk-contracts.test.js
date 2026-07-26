@@ -18,27 +18,31 @@ test("SDK Beta 登记全部公开方法并映射能力", () => {
   const methods = Object.keys(contracts.METHOD_CAPABILITIES);
   assert.deepEqual(methods, [
     "video.getAll", "video.current", "video.getStatus", "video.setRate", "video.setVolume", "video.mute", "video.play", "video.pause",
+    "video.setAutoplay", "video.setRateLock", "video.reset",
     "ocr.latest", "ocr.capture", "ocr.recognize",
     "qa.latest", "qa.ocr", "qa.voice",
     "ai.latest", "ai.history",
     "ai.ask", "ai.summary", "ai.translate",
     "page.info", "page.text", "page.title", "page.url",
-    "book.getStatus",
+    "book.getStatus", "book.turnPrev", "book.turnNext", "book.startAuto", "book.stopAuto", "book.setInterval",
     "event.on", "storage.get", "storage.set"
   ]);
   assert.equal(methods.every((method) => !!contracts.METHOD_CAPABILITIES[method]), true);
   assert.deepEqual(Array.from(contracts.CAPABILITIES), [
-    "video.read", "video.control", "ocr.read", "qa.read", "ai.read", "ai.request", "page.read", "book.read", "storage"
+    "video.read", "video.control", "ocr.read", "qa.read", "ai.read", "ai.request", "page.read", "book.read", "book.control", "storage"
   ]);
   assert.deepEqual(JSON.parse(JSON.stringify(contracts.PUBLIC_METHODS)), {
     "video.all": "video.getAll", "video.current": "video.current", "video.status": "video.getStatus",
     "video.rate": "video.setRate", "video.volume": "video.setVolume", "video.mute": "video.mute",
-    "video.play": "video.play", "video.pause": "video.pause", "ocr.latest": "ocr.latest",
+    "video.play": "video.play", "video.pause": "video.pause", "video.auto": "video.setAutoplay",
+    "video.lock": "video.setRateLock", "video.reset": "video.reset", "ocr.latest": "ocr.latest",
     "ocr.capture": "ocr.capture", "ocr.recognize": "ocr.recognize", "qa.latest": "qa.latest",
     "qa.ocr": "qa.ocr", "qa.voice": "qa.voice", "ai.latest": "ai.latest", "ai.history": "ai.history", "ai.ask": "ai.ask",
     "ai.summary": "ai.summary", "ai.translate": "ai.translate", "page.info": "page.info",
     "page.text": "page.text", "page.title": "page.title", "page.url": "page.url",
-    "book.status": "book.getStatus", "event.on": "event.on", "storage.get": "storage.get",
+    "book.status": "book.getStatus", "book.prev": "book.turnPrev", "book.next": "book.turnNext",
+    "book.start": "book.startAuto", "book.stop": "book.stopAuto", "book.interval": "book.setInterval",
+    "event.on": "event.on", "storage.get": "storage.get",
     "storage.set": "storage.set"
   });
   assert.equal(Object.keys(contracts.PUBLIC_METHODS).every((method) => method.length <= 13), true);
@@ -82,11 +86,15 @@ test("API 授权只接受已确认能力", () => {
   const contracts = loadContracts();
   assert.equal(contracts.authorize("video.current", [], ["video.read"]).ok, true);
   assert.equal(contracts.authorize("book.getStatus", [], ["book.read"]).ok, true);
+  assert.equal(contracts.authorize("book.turnNext", ["book"], ["book.control"]).ok, true);
   assert.equal(contracts.authorize("qa.latest", [], ["qa.read"]).ok, true);
   assert.equal(contracts.authorize("ai.latest", [], ["ai.read"]).ok, true);
   const bookDenied = contracts.authorize("book.getStatus", [], ["page.read"]);
   assert.equal(bookDenied.ok, false);
   assert.equal(bookDenied.capability, "book.read");
+  const bookControlDenied = contracts.authorize("book.turnNext", ["book"], ["book.read"]);
+  assert.equal(bookControlDenied.ok, false);
+  assert.equal(bookControlDenied.capability, "book.control");
   const denied = contracts.authorize("video.setRate", [2], ["video.read"]);
   assert.equal(denied.ok, false);
   assert.equal(denied.code, "SDK_CAPABILITY_REQUIRED");
@@ -112,6 +120,7 @@ test("SDK 请求协议拒绝未知方法和未登记事件", () => {
   };
   assert.equal(contracts.validateRequest(base).ok, true);
   assert.equal(contracts.validateRequest(Object.assign({}, base, { method: "book.getStatus" })).ok, true);
+  assert.equal(contracts.validateRequest(Object.assign({}, base, { method: "book.startAuto", args: [{ mode: "book", intervalSeconds: 30 }] })).ok, true);
   assert.equal(contracts.validateRequest(Object.assign({}, base, { method: "internal.userService" })).code, "SDK_METHOD_NOT_ALLOWED");
   assert.equal(contracts.validateRequest(Object.assign({}, base, { method: "event.on", args: ["internal.event"] })).code, "SDK_EVENT_NOT_ALLOWED");
 });

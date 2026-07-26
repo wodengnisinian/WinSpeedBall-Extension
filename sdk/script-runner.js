@@ -4,6 +4,10 @@
   var protocol = self.WinSpeedBallSdkSessionProtocol;
   var MAX_CODE_BYTES = 262144;
   var MAX_RESULT_BYTES = 65536;
+  var MAX_PENDING_RPC = 64;
+  var MAX_RPC_REQUESTS_PER_SECOND = 120;
+  var HEARTBEAT_INTERVAL_MS = 1000;
+  var HEARTBEAT_MAX_MISSED = 5;
   var initialized = false;
   var sessionId = "";
   var controlPort = null;
@@ -37,12 +41,14 @@
     return protocol.validIdentifier(message.runId, 96) &&
       protocol.validIdentifier(message.scriptId, 64) &&
       typeof message.code === "string" &&
+      (message.bookMode == null || ["", "book", "image", "chaoxing"].indexOf(message.bookMode) >= 0) &&
       codeByteLength(message.code) <= MAX_CODE_BYTES;
   }
 
   function clearActiveRun() {
     if (!activeRun) return;
     if (activeRun.timer) clearTimeout(activeRun.timer);
+    if (activeRun.heartbeatTimer) clearInterval(activeRun.heartbeatTimer);
     if (activeRun.worker) activeRun.worker.terminate();
     activeRun = null;
   }
@@ -59,6 +65,62 @@
       });
     }
     return true;
+  }
+
+  function consumeRpcBudget(run) {
+    var now = Date.now();
+    var elapsed = Math.max(0, now - run.rpcBudgetAt);
+    run.rpcBudgetAt = now;
+    run.rpcTokens = Math.min(
+      MAX_RPC_REQUESTS_PER_SECOND,
+      run.rpcTokens + elapsed * MAX_RPC_REQUESTS_PER_SECOND / 1000
+    );
+    if (run.rpcTokens < 1) return false;
+    run.rpcTokens -= 1;
+    return true;
+  }
+
+  function registerRpcRequest(requestId) {
+    if (!activeRun) return { ok: false, code: "SDK_RUN_NOT_ACTIVE", message: "The SDK run is no longer active." };
+    if (Object.prototype.hasOwnProperty.call(activeRun.pendingRpcIds, requestId)) {
+      return { ok: false, code: "SDK_RPC_DUPLICATE_REQUEST", message: "The SDK Worker reused an active request identifier." };
+    }
+    if (activeRun.pendingRpcCount >= MAX_PENDING_RPC) {
+      return { ok: false, code: "SDK_RPC_CONCURRENCY_LIMIT", message: "The SDK run exceeded the pending RPC concurrency limit." };
+    }
+    if (!consumeRpcBudget(activeRun)) {
+      return { ok: false, code: "SDK_RPC_RATE_LIMIT", message: "The SDK run exceeded the RPC request rate limit." };
+    }
+    activeRun.pendingRpcIds[requestId] = true;
+    activeRun.pendingRpcCount += 1;
+    return { ok: true };
+  }
+
+  function releaseRpcRequest(requestId) {
+    if (!activeRun || !Object.prototype.hasOwnProperty.call(activeRun.pendingRpcIds, requestId)) return false;
+    delete activeRun.pendingRpcIds[requestId];
+    activeRun.pendingRpcCount = Math.max(0, activeRun.pendingRpcCount - 1);
+    return true;
+  }
+
+  function heartbeatTick() {
+    if (!activeRun) return;
+    if (activeRun.heartbeatSent - activeRun.heartbeatAcked >= HEARTBEAT_MAX_MISSED) {
+      terminateActive("worker-unresponsive", {
+        code: "SDK_WORKER_UNRESPONSIVE",
+        message: "The SDK Worker stopped responding to the native heartbeat watchdog."
+      });
+      return;
+    }
+    activeRun.heartbeatSent += 1;
+    try {
+      activeRun.worker.postMessage(protocol.createEnvelope(sessionId, "HEARTBEAT_PING", {
+        runId: activeRun.runId,
+        heartbeatSequence: activeRun.heartbeatSent
+      }));
+    } catch (error) {
+      terminateActive("worker-heartbeat-error", protocol.serializeError(error, "SDK_WORKER_HEARTBEAT_FAILED"));
+    }
   }
 
   function validSdkRequest(message) {
@@ -80,7 +142,7 @@
     var message = event.data;
     var validation = protocol.validateEnvelope(message, {
       sessionId: sessionId,
-      allowedTypes: ["STARTED", "SDK_REQUEST", "RESULT", "ERROR"]
+      allowedTypes: ["STARTED", "HEARTBEAT_PONG", "SDK_REQUEST", "RESULT", "ERROR"]
     });
     if (!validation.ok || message.runId !== activeRun.runId) {
       terminateActive("worker-protocol-error", {
@@ -89,11 +151,32 @@
       });
       return;
     }
+    if (message.type === "HEARTBEAT_PONG") {
+      if (!Number.isInteger(message.heartbeatSequence) ||
+          message.heartbeatSequence < 1 ||
+          message.heartbeatSequence > activeRun.heartbeatSent) {
+        terminateActive("worker-protocol-error", {
+          code: "SDK_WORKER_INVALID_HEARTBEAT",
+          message: "Worker heartbeat response is invalid."
+        });
+        return;
+      }
+      activeRun.heartbeatAcked = Math.max(activeRun.heartbeatAcked, message.heartbeatSequence);
+      return;
+    }
     if (message.type === "SDK_REQUEST") {
       if (!validSdkRequest(message)) {
         terminateActive("worker-protocol-error", {
           code: "SDK_WORKER_INVALID_REQUEST",
           message: "Worker produced an invalid SDK request."
+        });
+        return;
+      }
+      var requestLimit = registerRpcRequest(message.request.requestId);
+      if (!requestLimit.ok) {
+        terminateActive("rpc-limit", {
+          code: requestLimit.code,
+          message: requestLimit.message
         });
         return;
       }
@@ -162,8 +245,16 @@
     activeRun = {
       runId: message.runId,
       scriptId: message.scriptId,
+      bookMode: message.bookMode || "",
       worker: worker,
-      timer: null
+      timer: null,
+      heartbeatTimer: null,
+      heartbeatSent: 0,
+      heartbeatAcked: 0,
+      pendingRpcIds: Object.create(null),
+      pendingRpcCount: 0,
+      rpcTokens: MAX_RPC_REQUESTS_PER_SECOND,
+      rpcBudgetAt: Date.now()
     };
     worker.onmessage = handleWorkerMessage;
     worker.onmessageerror = function () {
@@ -180,17 +271,22 @@
       sendToHost("ERROR", { runId: activeRun ? activeRun.runId : message.runId, error: error });
       clearActiveRun();
     };
-    activeRun.timer = setTimeout(function () {
-      terminateActive("timeout", {
-        code: "SDK_EXECUTION_TIMEOUT",
-        message: "SDK script exceeded the allowed execution time."
-      });
-    }, timeoutMs);
+    if (timeoutMs > 0) {
+      activeRun.timer = setTimeout(function () {
+        terminateActive("timeout", {
+          code: "SDK_EXECUTION_TIMEOUT",
+          message: "SDK script exceeded the requested execution time."
+        });
+      }, timeoutMs);
+    }
     worker.postMessage(protocol.createEnvelope(sessionId, "WORKER_INIT", {
       runId: message.runId,
       scriptId: message.scriptId,
+      bookMode: activeRun.bookMode,
       code: message.code
     }));
+    activeRun.heartbeatTimer = setInterval(heartbeatTick, HEARTBEAT_INTERVAL_MS);
+    heartbeatTick();
   }
 
   function forwardToWorker(message) {
@@ -198,6 +294,13 @@
       sendToHost("ERROR", {
         runId: typeof message.runId === "string" ? message.runId : "",
         error: { code: "SDK_RUN_NOT_ACTIVE", message: "The target SDK run is not active." }
+      });
+      return;
+    }
+    if (message.type === "RPC_RESULT" && !releaseRpcRequest(message.requestId)) {
+      terminateActive("host-protocol-error", {
+        code: "SDK_RPC_RESULT_MISMATCH",
+        message: "The RPC result does not match an active SDK request."
       });
       return;
     }

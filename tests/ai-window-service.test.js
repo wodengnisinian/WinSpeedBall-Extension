@@ -59,7 +59,9 @@ function createFixture(options = {}) {
     }
   };
   const context = {
-    self: options.normalizeText ? { WinSpeedBallTextNormalizer: { normalize: options.normalizeText } } : {},
+    self: options.normalizeStructuredText ? {
+      WinSpeedBallStructuredTextNormalizer: { normalize: options.normalizeStructuredText }
+    } : {},
     chrome, Promise, Object, Array, String, Number, Math, Date, setTimeout, clearTimeout
   };
   vm.createContext(context);
@@ -99,13 +101,24 @@ test("第二次 AI 回复会完整关闭第一次窗口并创建新的置前窗�
   assert.equal(fixture.created[1].focused, true);
   assert.deepEqual(fixture.removed, [first.windowId]);
   assert.equal(fixture.writes.at(-1).aiReplyWindowPayload.content, "第二条");
+  assert.equal(fixture.writes.at(-1).aiReplyWindowPayload.truncated, false);
 });
 
-test("AI 回复窗口保存前再次执行中英文正规化", async () => {
-  const fixture = createFixture({ normalizeText: (value) => String(value).replace(/繁體/g, "繁体") });
+test("AI 回复窗口保存前再次执行保留结构的文本清理", async () => {
+  const fixture = createFixture({
+    normalizeStructuredText: (value) => String(value).replace(/\u0000/g, "")
+  });
   const service = fixture.createService();
-  await service.show({ content: "繁體回答" });
-  assert.equal(fixture.writes.at(-1).aiReplyWindowPayload.content, "繁体回答");
+  await service.show({ content: "\u0000繁體回答：\\(c^2=\\frac{a}{b}\\)" });
+  assert.equal(fixture.writes.at(-1).aiReplyWindowPayload.content, "繁體回答：\\(c^2=\\frac{a}{b}\\)");
+});
+
+test("AI 回复窗口单独保存模型截断状态且不改写正文", async () => {
+  const fixture = createFixture();
+  const service = fixture.createService();
+  await service.show({ content: "严格格式正文", truncated: true });
+  assert.equal(fixture.writes.at(-1).aiReplyWindowPayload.content, "严格格式正文");
+  assert.equal(fixture.writes.at(-1).aiReplyWindowPayload.truncated, true);
 });
 
 test("新 AI 回复置前并与紧凑插件窗口相邻显示", async () => {

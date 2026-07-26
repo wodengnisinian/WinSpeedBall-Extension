@@ -3,27 +3,31 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="light">
   <title>Script Workspace</title>
   <style>
-    :root{--c-bg:#09111a;--c-panel:#101c28;--c-card:#142331;--c-card-hover:#182a3a;--c-border:#2a4052;--c-border-strong:#3b5b72;--c-text:#dce8f1;--c-strong:#f0f6fb;--c-muted:#8ca0b3;--c-accent:#78c1ec}
-    *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;font-family:"Segoe UI","Microsoft YaHei",sans-serif;background:var(--c-bg);color:var(--c-text);overflow:hidden;color-scheme:dark}body{font-size:12px;line-height:1.45}
-    #root{width:100%;height:100%;min-width:0;min-height:0;padding:0;display:flex;flex-direction:column;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin}
+    :root{--c-black:#171717;--c-white:#fff;--c-gray:#707070;--c-light-blue:#9bdcff;--c-bg:var(--c-white);--c-panel:var(--c-white);--c-card:var(--c-white);--c-card-hover:var(--c-light-blue);--c-border:rgba(112,112,112,.48);--c-border-strong:var(--c-gray);--c-text:var(--c-black);--c-strong:var(--c-black);--c-muted:var(--c-gray);--c-accent:var(--c-light-blue)}
+    *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;font-family:"Segoe UI","Microsoft YaHei",sans-serif;background:var(--c-bg);color:var(--c-text);overflow:hidden;color-scheme:light}body{font-size:12px;line-height:1.45}
+    #root{width:100%;height:100%;min-width:0;min-height:0;padding:0;display:flex;flex-direction:column;overflow:auto;overscroll-behavior:contain;scroll-behavior:smooth;scrollbar-gutter:auto;scrollbar-width:none;-ms-overflow-style:none}#root:focus-visible{outline:2px solid var(--c-accent);outline-offset:-3px}
     #root>:only-child{width:100%;max-width:100%;flex:1 1 auto;min-width:0;min-height:0}
     #root img,#root video,#root canvas,#root svg{max-width:100%;height:auto}#root input,#root select,#root textarea,#root button{max-width:100%;font:inherit}
     .ws-empty{min-height:100%;display:flex;align-items:center;justify-content:center;text-align:center;color:var(--c-muted);font-size:12px;line-height:1.55;padding:16px;background:var(--c-bg);overflow-wrap:anywhere}
-    .ws-error{white-space:pre-wrap;overflow-wrap:anywhere;color:#efc2c8;background:#291a20;border:1px solid #744d57;border-radius:7px;margin:7px;padding:8px;font-size:11px;line-height:1.45;overflow:auto}
+    .ws-error{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--c-black);background:var(--c-panel);border:1px solid var(--c-gray);border-radius:7px;margin:7px;padding:8px;font-size:11px;line-height:1.45;overflow:auto}
     .ws-menu{min-width:0;padding:10px;display:flex;flex-direction:column;gap:6px;background:var(--c-bg)}
-    .ws-menu::before{content:"脚本菜单";font-weight:700;color:var(--c-accent);margin-bottom:2px}
+    .ws-menu::before{content:"脚本菜单";font-weight:700;color:var(--c-black);margin-bottom:2px}
     .ws-menu-btn{width:100%;min-width:0;height:32px;border:1px solid var(--c-border);border-radius:7px;background:var(--c-card);color:var(--c-text);cursor:pointer;font-size:12px;text-align:left;padding:0 9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .ws-menu-btn:hover{background:var(--c-card-hover);border-color:var(--c-border-strong)}
-    .ws-note{position:fixed;right:7px;top:7px;max-width:calc(100% - 14px);max-height:calc(100% - 14px);overflow:auto;background:var(--c-panel);color:var(--c-strong);border:1px solid var(--c-border-strong);border-radius:7px;padding:7px 9px;font-size:11px;overflow-wrap:anywhere;z-index:999999;box-shadow:0 8px 20px rgba(2,8,14,.3)}
-    ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:var(--c-bg)}::-webkit-scrollbar-thumb{background:#30485d;border-radius:999px}
-    @media (max-width:320px){.ws-menu{padding:7px}.ws-empty{padding:12px}.ws-menu-btn{height:30px}}
+    .ws-menu-btn:hover{background:var(--c-card);border-color:var(--c-light-blue)}
+    .ws-note{position:fixed;right:7px;top:7px;max-width:calc(100% - 14px);max-height:calc(100% - 14px);overflow:auto;background:var(--c-panel);color:var(--c-strong);border:1px solid var(--c-border-strong);border-radius:7px;padding:7px 9px;font-size:11px;overflow-wrap:anywhere;z-index:999999;box-shadow:0 8px 20px rgba(23,23,23,.14)}
+    .ws-scroll-progress{position:fixed;left:0;right:0;top:0;z-index:999998;height:2px;overflow:hidden;background:var(--c-white)}.ws-scroll-progress>span{display:block;width:100%;height:100%;background:var(--c-accent);transform:scaleX(0);transform-origin:left center;transition:transform 120ms linear}.ws-scroll-top{position:fixed;right:7px;bottom:7px;z-index:999998;height:28px;padding:0 9px;border:1px solid var(--c-gray);border-radius:7px;background:var(--c-light-blue);color:var(--c-black);cursor:pointer;font:700 10px/1 "Segoe UI","Microsoft YaHei",sans-serif;box-shadow:0 6px 18px rgba(23,23,23,.16)}.ws-scroll-top:hover{background:var(--c-card-hover)}
+    *{scrollbar-width:none;-ms-overflow-style:none}*::-webkit-scrollbar{display:none!important;width:0!important;height:0!important}
+    @media (max-width:320px){.ws-menu{padding:7px}.ws-empty{padding:12px}.ws-menu-btn{height:30px}}@media(prefers-reduced-motion:reduce){#root{scroll-behavior:auto}.ws-scroll-progress>span{transition:none}}
   </style>
 </head>
 <body>
-  <div id="root"><div class="ws-empty">等待脚本界面</div></div>
+  <div class="ws-scroll-progress" id="workspaceScrollProgress" data-wsb-shell role="progressbar" aria-label="脚本工作区阅读进度" hidden><span></span></div>
+  <button class="ws-scroll-top" id="workspaceScrollTopBtn" data-wsb-shell type="button" aria-controls="root" hidden>回到顶部</button>
+  <div id="root" tabindex="0" role="region" aria-label="脚本工作区，可使用滚轮、触控板或键盘翻页"><div class="ws-empty">等待脚本界面</div></div>
+  <script src="../shared/scroll-surface.js"></script>
   <script src="index.js"></script>
 </body>
 </html>
